@@ -5,7 +5,7 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-media-test-'));
 process.env.CAPCUT_DRAFTS_DIR = ROOT; // must be set before core.js loads
 delete process.env.CAPCUT_SYNC_MODE;
 process.env.CAPCUT_EFFECT_CACHE = path.join(ROOT, '.effect-cache');
-const { CapCutDraft, resolveMediaPath, isPlaceholderPath } = await import('../src/core.js');
+const { CapCutDraft, resolveMediaPath, isPlaceholderPath, cloneDraft, findDraftById } = await import('../src/core.js');
 const { JournaledSession, liveSync } = await import('../src/live.js');
 const tick = () => new Promise(r => setTimeout(r, 0));
 const OUTSIDE = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-media-outside-')); // stands in for ~/Desktop, Figma exports, ...
@@ -139,5 +139,16 @@ const withMeta = (dir, id) => { fs.writeFileSync(path.join(dir, 'draft_meta_info
   assert.deepEqual([m.config.width, m.config.height, m.config.centerY, m.config.feather], [1, 0.3, 0.2, 0.05]);
   assert.notEqual(m.constant_material_id, m.id);
   console.log('PASS 6 full mask record');
+}
+// ---- 7. a cloned project gets its own identity, not a copy of the base's ----
+{
+  const base = withMeta(makeDraft(ROOT, 'm7-base'), 'ID-M7');
+  cloneDraft('m7-base', 'm7-copy');
+  const meta = JSON.parse(fs.readFileSync(path.join(ROOT, 'm7-copy', 'draft_meta_info.json'), 'utf8'));
+  assert.notEqual(meta.draft_id, 'ID-M7', 'new draft_id');
+  assert.equal(meta.draft_name, 'm7-copy'); assert.equal(meta.draft_fold_path, path.join(ROOT, 'm7-copy'));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(base, 'draft_meta_info.json'), 'utf8')).draft_id, 'ID-M7', 'base untouched');
+  assert.equal(findDraftById('ID-M7'), 'm7-base'); assert.equal(findDraftById(meta.draft_id), 'm7-copy');
+  console.log('PASS 7 clone gets its own identity');
 }
 console.log('\nALL MEDIA TESTS PASSED');

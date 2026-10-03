@@ -805,6 +805,15 @@ export function cloneDraft(base, newName, { empty = false } = {}) {
   fs.mkdirSync(dst, { recursive: true });
   // recursive, so a nested Timelines/ layout comes along too
   fs.cpSync(src, dst, { recursive: true, filter: s => { const fn = path.basename(s); return !(fn === '.locked' || fn.endsWith('.mcpbak') || fn.endsWith('.tmp')); } }); // don't propagate this tool's own sentinel/backup files
+  // a copied draft_meta_info.json still carries the BASE project's identity (draft_id, name, folder path):
+  // CapCut would list a second project with the base's name, and opening it could open the base. Give it its own.
+  const metaPath = path.join(dst, 'draft_meta_info.json');
+  if (fs.existsSync(metaPath)) {
+    const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+    const now = Date.now() * 1000;
+    Object.assign(meta, { draft_id: uid(), draft_name: newName, draft_fold_path: dst, tm_draft_create: now, tm_draft_modified: now });
+    writeAtomic(metaPath, JSON.stringify(meta));
+  }
   if (empty) {
     const d = new CapCutDraft(newName);
     for (const k of Object.keys(d.content.materials)) if (Array.isArray(d.content.materials[k])) d.content.materials[k] = [];

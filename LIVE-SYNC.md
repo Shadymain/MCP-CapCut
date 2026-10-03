@@ -62,7 +62,7 @@ Each draft resolves one authoritative timeline file, in this order:
 
 On save, that file is backed up to `.mcpbak` and written atomically, then every other copy that exists (root `draft_info.json`, `draft_content.json`, and both `template-2.tmp` files) gets the same content. CapCut's own `.bak` files are left alone.
 
-Verified on CapCut 9.5.0 for Mac: the server scaled a clip to 150% with CapCut closed, and CapCut opened the project showing 150%. On open, CapCut moved the saved bytes into its own `draft_info.json.bak` and rewrote all four timeline copies with its own formatting, keeping the edit.
+Verified on CapCut 9.5.0 for Mac: the server scaled a clip to 150% with CapCut closed, and CapCut opened the project showing 150%. On open, CapCut moved the saved bytes into its own `draft_info.json.bak` and rewrote all four timeline copies with its own formatting, keeping the edit. On quit, it rewrote all four copies again (still 150%), updated its `.bak` files, and removed `.locked`. It never touched the server's `.mcpbak` backups.
 
 ## Registering the server
 

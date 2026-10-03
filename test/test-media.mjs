@@ -4,6 +4,7 @@ import { makeDraft } from './make-draft.mjs';
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-media-test-'));
 process.env.CAPCUT_DRAFTS_DIR = ROOT; // must be set before core.js loads
 delete process.env.CAPCUT_SYNC_MODE;
+process.env.CAPCUT_EFFECT_CACHE = path.join(ROOT, '.effect-cache');
 const { CapCutDraft, resolveMediaPath, isPlaceholderPath } = await import('../src/core.js');
 const { JournaledSession, liveSync } = await import('../src/live.js');
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -115,5 +116,28 @@ const withMeta = (dir, id) => { fs.writeFileSync(path.join(dir, 'draft_meta_info
   assert.equal(d2.content.materials.videos.find(m => m.id === 'PHMAT').path, before, 'rename repair leaves it as is');
   v = d2.validate(); assert.ok(v.ok, v.issues.join('; '));
   console.log('PASS 5 placeholder paths');
+}
+// ---- 6. masks are written as the full record CapCut writes, pointing at the downloaded effect ----
+// (CapCut silently drops a mask record without these fields the next time it saves the project)
+{
+  makeDraft(ROOT, 'm6');
+  const REAL_KEYS = ['id', 'type', 'category', 'category_name', 'category_id', 'panel', 'is_old_version', 'resource_id', 'constant_material_id', 'name', 'resource_type', 'path', 'position_info', 'config', 'text_config', 'platform', 'loader_work_space', 'track_segment', 'contour_path', 'source_platform']; // from a Rectangle mask made in CapCut 9.x
+  const REAL_CONFIG = ['width', 'height', 'centerX', 'centerY', 'rotation', 'feather', 'expansion', 'roundCorner', 'invert', 'aspectRatio'];
+  const d = new CapCutDraft('m6');
+  const miss = d.addMask('SEG1', 'Rectangle', { width: 1, height: 0.3, centerY: 0.2 });
+  assert.match(miss.warning, /isn't in CapCut's effect cache/, 'warns when the effect was never downloaded');
+  const effect = path.join(process.env.CAPCUT_EFFECT_CACHE, '794455095', '02b8999168d121538a98ea59127483ef'); fs.mkdirSync(effect, { recursive: true });
+  const r = d.addMask('SEG1', 'Rectangle', { width: 1, height: 0.3, centerY: 0.2, feather: 0.05 });
+  assert.ok(!r.warning);
+  const s1 = d.content.tracks[0].segments[0];
+  const masks = d.content.materials.common_mask.filter(m => s1.extra_material_refs.includes(m.id));
+  assert.equal(masks.length, 1, 'replaces the earlier mask on the segment');
+  const m = masks[0];
+  assert.deepEqual(Object.keys(m).sort(), [...REAL_KEYS].sort(), 'same fields as a CapCut-made mask');
+  assert.deepEqual(Object.keys(m.config).sort(), [...REAL_CONFIG].sort());
+  assert.equal(m.path, effect); assert.equal(m.resource_id, '7374021450748924432'); assert.equal(m.category, 'video');
+  assert.deepEqual([m.config.width, m.config.height, m.config.centerY, m.config.feather], [1, 0.3, 0.2, 0.05]);
+  assert.notEqual(m.constant_material_id, m.id);
+  console.log('PASS 6 full mask record');
 }
 console.log('\nALL MEDIA TESTS PASSED');

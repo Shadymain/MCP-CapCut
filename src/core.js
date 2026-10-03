@@ -587,20 +587,26 @@ export class CapCutDraft {
     const m = findInCatalog(MASKS, name);
     if (!m) throw new Error(`unknown mask: "${name}" (use capcut_list_masks to see the available shapes)`);
     const { s } = this._find(segId);
+    // the full record CapCut itself writes (copied from a mask made in CapCut). A record without the effect
+    // `path` and these fields is silently DROPPED by CapCut the next time it saves the project.
+    const effectPath = findEffectInCache(m.md5);
     const mat = {
-      id: uid(), type: 'mask', name: m.name, resource_type: m.resourceType, resource_id: m.resourceId,
-      platform: 'all', position_info: '',
+      id: uid(), type: 'mask', category: 'video', category_name: '', category_id: '', panel: '', is_old_version: false,
+      resource_id: m.resourceId, constant_material_id: uid(), name: m.name, resource_type: m.resourceType,
+      path: effectPath || '', position_info: '',
       config: {
-        centerX: opts.centerX ?? 0, centerY: opts.centerY ?? 0,
         width: opts.width ?? 0.5, height: opts.height ?? (0.5 * m.defaultAspectRatio),
-        aspectRatio: m.defaultAspectRatio, rotation: opts.rotation ?? 0,
-        feather: opts.feather ?? 0, invert: !!opts.invert, roundCorner: opts.roundCorner ?? 0,
+        centerX: opts.centerX ?? 0, centerY: opts.centerY ?? 0, rotation: opts.rotation ?? 0,
+        feather: opts.feather ?? 0, expansion: 0, roundCorner: opts.roundCorner ?? 0, invert: !!opts.invert,
+        aspectRatio: m.defaultAspectRatio,
       },
+      text_config: { content: '', font_name: '', font_path: '', font_resource_id: '', font_size: 15, bold_width: 0, italic_degree: 0, has_underline: false, line_gap: 0, char_spacing: 0, align_type: 15, scale: 1 },
+      platform: 'all', loader_work_space: '', track_segment: '', contour_path: null, source_platform: 0,
     };
     this._mats('common_mask').push(mat);
     s.extra_material_refs = (s.extra_material_refs || []).filter(id => findMat(this.content, id)[0] !== 'common_mask');
     s.extra_material_refs.push(mat.id);
-    return { segmentId: segId, mask: m.name };
+    return { segmentId: segId, mask: m.name, ...(effectPath ? {} : { warning: `the ${m.name} mask isn't in CapCut's effect cache yet (${EFFECT_CACHE_DIR}); CapCut may drop it. Apply any ${m.name} mask once in CapCut so it downloads, then add it again.` }) };
   }
 
   // ---------- stickers: caller-supplied resource_id -- CapCut resolves geometry from its own catalog ----------
@@ -836,6 +842,15 @@ function writeSolidPng(dir, hex, w, h) {
   return file;
 }
 
+// CapCut downloads each effect (masks included) to <cache>/effect/<id>/<md5>; a mask record must point there.
+export const EFFECT_CACHE_DIR = process.env.CAPCUT_EFFECT_CACHE || path.join(os.homedir(), 'Library/Containers/com.lemon.lvoverseas/Data/Movies/CapCut/User Data/Cache/effect');
+export function findEffectInCache(md5, cacheDir = EFFECT_CACHE_DIR) {
+  if (!md5) return null;
+  let ids = [];
+  try { ids = fs.readdirSync(cacheDir); } catch { return null; }
+  for (const id of ids) { const p = path.join(cacheDir, id, md5); try { if (fs.statSync(p).isDirectory()) return p; } catch { /* not here */ } }
+  return null;
+}
 const MEDIA_SUBDIR = 'mcp_media';
 // CapCut stores files inside a project folder as "##_draftpath_placeholder_<id>_##/<relative path>" (it rewrites
 // our absolute mcp_media paths to this form once it has the project open). The prefix stands for the project

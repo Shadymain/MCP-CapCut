@@ -2,7 +2,7 @@
 
 Watch Claude's edits show up in the CapCut app, without closing CapCut yourself.
 
-CapCut has no plugin API, so this can't be true live editing the way Figma does it. Instead, Claude works in batches. After each batch it calls `capcut_live_sync`, which:
+CapCut has no plugin API, so this can't be true live editing the way Figma does it. Instead, Claude makes all the edits for a request, then calls `capcut_live_sync` once at the end. In quit mode, the sync:
 
 1. Politely quits CapCut (like Cmd+Q). CapCut saves its own copy first, including anything you changed by hand.
 2. Waits for the project file to settle.
@@ -29,12 +29,12 @@ If one of Claude's edits no longer applies (for example, you deleted the clip it
 
 ## Tools added
 
-- **`capcut_live_sync`** `{ draft, relaunch?, reopen?, mode? }`: pushes pending edits into the app. `mode` is `quit` or `close` (see below) and overrides `CAPCUT_SYNC_MODE`.
+- **`capcut_live_sync`** `{ draft, relaunch?, reopen?, mode? }`: pushes pending edits into the app. Call it once after all the edits for a request. `mode` is `quit` or `close` (see below) and overrides `CAPCUT_SYNC_MODE`.
 - **`capcut_live_status`** `{ draft }`: shows whether CapCut is running, whether the draft is open in it, and how many edits are pending.
 
-## Close mode: keep CapCut open (experimental)
+## Close mode: keep CapCut open (recommended)
 
-Set `CAPCUT_SYNC_MODE=close` (or pass `mode: "close"`) to swap the quit and relaunch for closing just the project:
+Set `CAPCUT_SYNC_MODE=close` in the server's `env` (or pass `mode: "close"`) to swap the quit and relaunch for closing just the project:
 
 1. Clicks **CapCut > Back to home page**. CapCut saves its own copy and removes `.locked`, usually within a second, and stays open on its home screen.
 2. Waits for the timeline file to settle, re-applies Claude's edits on top of yours, validates and saves, as in quit mode.
@@ -63,7 +63,7 @@ The server talks to the helper through files in `~/Library/Application Support/C
 
 **How the tile is found.** The home screen's project tiles carry no names for Accessibility, so the project is located by its place in CapCut's newest-first order, read from `root_meta_info.json`. If a different project opens, the sync goes back to the home screen and asks you to click. A tile scrolled out of view, or a different sort order on the home screen, ends the same way.
 
-Quit mode stays the default until close mode has had more real runs.
+Close mode has worked end to end on CapCut 9.5.0 for Mac: the project closed and reopened in about 3 seconds without CapCut quitting. The server still defaults to quit mode when `CAPCUT_SYNC_MODE` isn't set, so set it as in [Registering the server](#registering-the-server). Quit mode stays the automatic fallback whenever close mode can't let go of the project.
 
 ## Auto-reopening the project after a relaunch (experimental)
 
@@ -82,7 +82,7 @@ The script is untested against CapCut's real interface. If it reports "not found
 ## Known limits
 
 - **Replay addresses tracks by index.** If you add or reorder tracks in CapCut between syncs, an edit that targeted a track by index can land on the wrong track. Check after syncing.
-- **Each sync costs a few seconds.** In quit mode CapCut quits and relaunches. Close mode is quicker (about 3 s on CapCut 9.5) but still brings CapCut to the front. Either way, sync after a meaningful batch of edits, not after every single one.
+- **Each sync costs a few seconds.** In quit mode CapCut quits and relaunches. Close mode is quicker (about 3 s on CapCut 9.5) but still brings CapCut to the front. Either way, make all the edits for a request first and sync once at the end; the tool description tells Claude to do this.
 - **CapCut updates can change the draft format.** Keep the backups, and consider pausing auto-updates.
 
 ## Which file holds the timeline (macOS)
@@ -106,7 +106,7 @@ Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json
   "capcut": {
     "command": "/usr/local/bin/node",
     "args": ["/absolute/path/to/MCP-CapCut/src/server.js"],
-    "env": { "CAPCUT_TEMPLATE_DRAFT": "sandbox" }
+    "env": { "CAPCUT_TEMPLATE_DRAFT": "sandbox", "CAPCUT_SYNC_MODE": "close" }
   }
 }
 ```
@@ -114,7 +114,7 @@ Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json
 Claude Code:
 
 ```bash
-claude mcp add --scope user capcut -e CAPCUT_TEMPLATE_DRAFT=sandbox -- "$(which node)" /absolute/path/to/MCP-CapCut/src/server.js
+claude mcp add --scope user capcut -e CAPCUT_TEMPLATE_DRAFT=sandbox -e CAPCUT_SYNC_MODE=close -- "$(which node)" /absolute/path/to/MCP-CapCut/src/server.js
 ```
 
-`CAPCUT_TEMPLATE_DRAFT` names a project folder with at least a video clip and a text layer; the server copies clip and track structure from it when the draft being edited lacks one.
+`CAPCUT_SYNC_MODE=close` makes close mode the default (see above); leave it out to quit and relaunch CapCut on every sync. `CAPCUT_TEMPLATE_DRAFT` names a project folder with at least a video clip and a text layer; the server copies clip and track structure from it when the draft being edited lacks one.

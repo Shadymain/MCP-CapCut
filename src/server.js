@@ -120,15 +120,15 @@ s.tool('capcut_clone_draft', 'Copy a draft folder to a new name (valid scaffoldi
   { base: z.string(), newName: z.string(), empty: z.boolean().optional() },
   wrap(async ({ base, newName, empty }) => cloneDraft(base, newName, { empty: !!empty })));
 
-s.tool('capcut_add_video', 'Add a video clip at a time on a track. Session edit; call capcut_save to persist.',
+s.tool('capcut_add_video', 'Add a video clip at a time on a track. The file is copied into the project folder (CapCut is sandboxed and cannot read most other paths). Session edit; call capcut_save to persist.',
   { draft: z.string(), file: z.string(), ...placeOpts },
   wrap(async (a) => get(a.draft).addVideo(a.file, optsFrom(a))));
 
-s.tool('capcut_add_image', 'Add an image at a time on a track.',
+s.tool('capcut_add_image', 'Add an image at a time on a track. The file is copied into the project folder (CapCut is sandboxed and cannot read most other paths).',
   { draft: z.string(), file: z.string(), ...placeOpts },
   wrap(async (a) => get(a.draft).addImage(a.file, optsFrom(a))));
 
-s.tool('capcut_add_audio', 'Add an audio clip at a time on a track.',
+s.tool('capcut_add_audio', 'Add an audio clip at a time on a track. The file is copied into the project folder (CapCut is sandboxed and cannot read most other paths).',
   { draft: z.string(), file: z.string(), ...placeOpts },
   wrap(async (a) => get(a.draft).addAudio(a.file, optsFrom(a))));
 
@@ -146,6 +146,10 @@ s.tool('capcut_add_line', 'Add a thin solid-colour line (divider): generates a P
     atSec: z.number().optional(), durSec: z.number().optional().describe('default 5s'), posX: z.number().optional(), posY: z.number().optional(),
     opacity: z.number().optional(), trackIndex: z.number().int().optional(), trackRenderIndex: z.number().int().optional() },
   wrap(async (a) => get(a.draft).addLine({ color: a.color, lengthPx: a.lengthPx, thicknessPx: a.thicknessPx, vertical: a.vertical, atUs: sec(a.atSec), durUs: sec(a.durSec), posX: a.posX, posY: a.posY, opacity: a.opacity, trackIndex: a.trackIndex, trackRenderIndex: a.trackRenderIndex })));
+
+s.tool('capcut_localize_media', 'Copy media files that live outside the project into its mcp_media folder and repoint the clips at the copies -- the fix for CapCut saying a file is "not accessible" (it is sandboxed to ~/Movies plus files picked in its own dialogs). Pass segmentIds to do just those clips; omit to do every video/image/audio in the draft. Originals are left where they are.',
+  { draft: z.string(), segmentIds: z.array(z.string()).optional() },
+  wrap(async ({ draft, segmentIds }) => get(draft).localizeMedia(segmentIds)));
 
 s.tool('capcut_add_track', 'Add a new track (video | audio | text | sticker).',
   { draft: z.string(), type: z.enum(['video', 'audio', 'text', 'sticker']).optional(), name: z.string().optional() },

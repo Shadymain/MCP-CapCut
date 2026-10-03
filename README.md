@@ -58,7 +58,8 @@ All times at the tool boundary are in **seconds** (converted to CapCut's microse
 | `capcut_clone_draft` | copy a draft (optionally emptied) for a fresh build |
 | `capcut_add_video / _image / _audio` | place media on a track. Omit `atSec` to append right after the last clip on that track — no running-total math needed for a sequence of clips |
 | `capcut_add_text` | text overlay (needs a text template draft). Omit `atSec` to append too. `styleFrom: <segmentId>` clones an existing text layer in the draft (font, stroke, shadow, transform) and changes only the words, colour, size, position and `letterSpacing` |
-| `capcut_add_line` | thin solid-colour divider: generates a PNG (in `CAPCUT_ASSETS_DIR`, default `~/.capcut-mcp/assets`) and places it on a `lines` video track at exactly `lengthPx` × `thicknessPx` canvas pixels |
+| `capcut_localize_media` | copy media that lives outside the project into `<project>/mcp_media/` and repoint the clips (all, or the given `segmentIds`) -- fixes CapCut's "file not accessible" |
+| `capcut_add_line` | thin solid-colour divider: generates a PNG inside the project and places it on a `lines` video track at exactly `lengthPx` × `thicknessPx` canvas pixels |
 | `capcut_add_track` | new video/audio/text/sticker track |
 | `capcut_set_track_mute` | mute/unmute an entire track — a track cloned from a muted template starts muted with no visible sign of it besides this field |
 | `capcut_move_segment` | change start time / track |
@@ -133,6 +134,7 @@ Filters, transitions, and masks in real CapCut are **not freely inventable** —
 - Video/character scene effects (blur, glitch, etc.) and canned intro/outro animations aren't ported yet — use `capcut_raw_patch`.
 - Rich multi-style text (per-word styling, karaoke captions) is still a single uniform style per text block.
 - `capcut_add_text` needs a draft with a text layer to harvest from (`CAPCUT_TEMPLATE_DRAFT`).
+- CapCut on macOS is sandboxed: it can read `~/Movies` (where projects live) and files you picked in its own dialogs, nothing else. So every file the server adds (videos, images, audio, generated lines) is copied into `<project>/mcp_media/` and used from there; your originals are untouched. Paths into that folder are repaired automatically if CapCut renames the project.
 - No canvas/aspect-ratio retargeting (e.g. 16:9 → 9:16) yet.
 
 ## Architecture

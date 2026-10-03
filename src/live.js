@@ -18,7 +18,7 @@ import { CapCutDraft, findDraftById, withIdCapture, withIdReplay } from './core.
 
 // CapCutDraft methods that change the draft. Everything else passes straight through unjournaled.
 export const MUTATING = new Set([
-  'setTrackMute', 'addTrack', 'addVideo', 'addImage', 'addAudio', 'addText', 'addLine',
+  'setTrackMute', 'addTrack', 'addVideo', 'addImage', 'addAudio', 'addText', 'addLine', 'localizeMedia',
   'moveSegment', 'trimSegment', 'splitSegment', 'deleteSegment', 'setProps', 'rawPatch',
   'addKeyframe', 'removeKeyframes', 'addAudioFade', 'addFilter', 'addTransition', 'addMask',
   'addSticker', 'addCaptions', 'clearCaptionTrack',

@@ -183,6 +183,7 @@ export class CapCutDraft {
     this.meta = fs.existsSync(this.metaPath) ? JSON.parse(fs.readFileSync(this.metaPath, 'utf8')) : null;
     this.draftId = this.meta?.draft_id || null; // CapCut's own id: survives renames, unlike the folder name
     this._tpl = null;
+    this._healMovedPaths();
   }
   templates() {
     if (this._tpl) return this._tpl;
@@ -251,6 +252,7 @@ export class CapCutDraft {
   _addMedia(kind, file, opts) {
     this._pushUndo();
     if (!fs.existsSync(file)) throw new Error(`file not found: ${file}`);
+    file = this.importFile(file); // CapCut is sandboxed: it can only read media inside the project (or files the user picked in CapCut)
     const type = kind === 'audio' ? 'audio' : (kind === 'image' ? 'photo' : 'video');
     const tplType = kind === 'image' ? (this.templates().image ? 'image' : 'video') : kind;
     const tpl = this.templates()[tplType] || this.templates().video;
@@ -274,6 +276,49 @@ export class CapCutDraft {
     track.segments.push(seg);
     this.content.duration = Math.max(this.content.duration || 0, at + dur);
     return { segmentId: seg.id, atSec: at / US, endUs: at + dur };
+  }
+  // ---------- project-local media ----------
+  // CapCut on macOS is sandboxed (com.apple.security.app-sandbox): it can read ~/Movies, where projects live,
+  // and files the user chose in its own dialogs -- not arbitrary paths the server hands it. So every file the
+  // server adds is copied into <project>/mcp_media/ and referenced from there.
+  get mediaDir() { return path.join(this.dir, MEDIA_SUBDIR); }
+  importFile(file) {
+    const src = path.resolve(file);
+    if (src.startsWith(this.dir + path.sep)) return src; // already inside the project
+    fs.mkdirSync(this.mediaDir, { recursive: true });
+    const ext = path.extname(src), stem = path.basename(src, ext);
+    let dest = path.join(this.mediaDir, stem + ext);
+    if (fs.existsSync(dest) && !sameFile(src, dest)) dest = path.join(this.mediaDir, `${stem}_${fileHash(src).slice(0, 8)}${ext}`); // name taken by a different file
+    if (!fs.existsSync(dest)) { const tmp = dest + '.part'; fs.copyFileSync(src, tmp, fs.constants.COPYFILE_FICLONE); fs.renameSync(tmp, dest); } // clone on APFS: instant, no extra disk
+    return dest;
+  }
+  // copy media that lives outside the project into it and repoint the materials (all of them, or just the
+  // ones the given segments use). Same file used by several materials is copied once.
+  localizeMedia(segmentIds) {
+    this._pushUndo();
+    let mats;
+    if (segmentIds && segmentIds.length) {
+      mats = segmentIds.map(id => { const { s } = this._find(id); const [k, m] = findMat(this.content, s.material_id); if (!['videos', 'audios'].includes(k)) throw new Error(`segment ${id} has no media file`); return m; });
+    } else mats = [...(this.content.materials.videos || []), ...(this.content.materials.audios || [])];
+    const moved = [], skipped = [];
+    for (const m of mats) {
+      if (!m.path || m.path.startsWith(this.dir + path.sep) || m.path.startsWith('##_')) continue;
+      if (!fs.existsSync(m.path)) { skipped.push({ path: m.path, reason: 'file not found' }); continue; }
+      const to = this.importFile(m.path); moved.push({ from: m.path, to }); m.path = to;
+    }
+    return { moved, skipped };
+  }
+  // CapCut moves a project's folder when it applies a rename, so absolute paths into the OLD folder (our
+  // mcp_media copies) go stale. Repoint any missing path that pointed into some project folder at the same
+  // relative file in this one, when it exists here.
+  _healMovedPaths() {
+    const root = path.resolve(DRAFTS_DIR) + path.sep;
+    for (const k of ['videos', 'audios']) for (const m of (this.content.materials?.[k] || [])) {
+      if (typeof m.path !== 'string' || !m.path.startsWith(root) || m.path.startsWith(this.dir + path.sep) || fs.existsSync(m.path)) continue;
+      const rel = m.path.slice(root.length).split('/').slice(1).join('/'); // drop the old folder name
+      const here = path.join(this.dir, rel);
+      if (rel && fs.existsSync(here)) m.path = here;
+    }
   }
   addVideo(file, opts = {}) { return this._addMedia('video', file, opts); }
   addImage(file, opts = {}) { return this._addMedia('image', file, opts); }
@@ -342,7 +387,7 @@ export class CapCutDraft {
     const color = opts.color || '#ffffff';
     const lengthPx = Math.round(opts.lengthPx || 600), thicknessPx = Math.max(1, Math.round(opts.thicknessPx || 2));
     const [w, h] = opts.vertical ? [thicknessPx, lengthPx] : [lengthPx, thicknessPx];
-    const file = writeSolidPng(color, w, h);
+    const file = writeSolidPng(this.mediaDir, color, w, h);
     // overlay lines go on their own "lines" video track (made on first use), never onto the main clip track
     let trackIndex = opts.trackIndex;
     if (trackIndex == null) { const i = this.content.tracks.findIndex(t => t.type === 'video' && t.name === 'lines'); trackIndex = i >= 0 ? i : this.addTrack('video', 'lines'); }
@@ -766,7 +811,6 @@ export function cloneDraft(base, newName, { empty = false } = {}) {
 }
 
 // ---- solid-colour PNG for addLine (no image library needed: an RGBA PNG is just zlib-compressed rows) ----
-export const ASSETS_DIR = process.env.CAPCUT_ASSETS_DIR || path.join(os.homedir(), '.capcut-mcp', 'assets');
 const CRC_TABLE = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
 const crc32 = buf => { let c = 0xFFFFFFFF; for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
 function pngChunk(type, data) {
@@ -785,12 +829,16 @@ export function solidPng(hex, w, h) {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk('IHDR', ihdr), pngChunk('IDAT', zlib.deflateSync(Buffer.concat(Array(h).fill(row)))), pngChunk('IEND', Buffer.alloc(0))]);
 }
 // deterministic name, so replaying an addLine during live sync points at the same file
-function writeSolidPng(hex, w, h) {
-  fs.mkdirSync(ASSETS_DIR, { recursive: true });
-  const file = path.join(ASSETS_DIR, `line_${String(hex).replace('#', '').toLowerCase()}_${w}x${h}.png`);
+function writeSolidPng(dir, hex, w, h) {
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `line_${String(hex).replace('#', '').toLowerCase()}_${w}x${h}.png`);
   if (!fs.existsSync(file)) writeAtomic(file, solidPng(hex, w, h));
   return file;
 }
+
+const MEDIA_SUBDIR = 'mcp_media';
+const fileHash = p => crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex');
+const sameFile = (a, b) => { try { return fs.statSync(a).size === fs.statSync(b).size && fileHash(a) === fileHash(b); } catch { return false; } };
 
 function hexToRgb(hex) { const h = hex.replace('#', ''); return [parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255]; }
 function deepMerge(t, s) { for (const k of Object.keys(s)) { if (s[k] && typeof s[k] === 'object' && !Array.isArray(s[k]) && t[k] && typeof t[k] === 'object') deepMerge(t[k], s[k]); else t[k] = s[k]; } return t; }

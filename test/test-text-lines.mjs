@@ -3,7 +3,6 @@ import fs from 'fs'; import os from 'os'; import path from 'path'; import assert
 import { makeDraft } from './make-draft.mjs';
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-text-test-'));
 process.env.CAPCUT_DRAFTS_DIR = ROOT; // must be set before core.js loads
-process.env.CAPCUT_ASSETS_DIR = path.join(ROOT, 'assets');
 delete process.env.CAPCUT_SYNC_MODE;
 const { CapCutDraft, solidPng } = await import('../src/core.js');
 const { JournaledSession, liveSync } = await import('../src/live.js');
@@ -93,7 +92,8 @@ const textOf = (d, segId) => { const s = segs(d.content).find(x => x.id === segI
   makeTextDraft('t4');
   const d = new CapCutDraft('t4');
   const a = d.addLine({ color: '#e8a33d', lengthPx: 480, thicknessPx: 2, posY: 0.1, atUs: 0 });
-  assert.ok(fs.existsSync(a.file) && a.file.startsWith(process.env.CAPCUT_ASSETS_DIR));
+  assert.ok(fs.existsSync(a.file)); assert.equal(path.dirname(a.file), path.join(ROOT, 't4', 'mcp_media'), 'PNG generated inside the project');
+  assert.equal(d.content.materials.videos.find(x => x.material_name === path.basename(a.file)).path, a.file);
   const tr = d.content.tracks.find(t => t.name === 'lines');
   assert.ok(tr && tr.type === 'video'); assert.equal(tr.segments.length, 1);
   assert.equal(d.content.tracks[0].segments.length, 2, 'main clip track untouched');

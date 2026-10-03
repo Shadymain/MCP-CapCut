@@ -64,7 +64,22 @@ function safeDraftPath(name) {
   return resolved;
 }
 
-const uid = () => crypto.randomUUID().toUpperCase();
+// ---- id source: replayable, so live sync can re-run a session's edits on a freshly reloaded draft ----
+// and get the SAME segment/material ids back (later edits in the session refer to ids earlier edits created).
+let _idReplay = null, _idCapture = null;
+const uid = () => {
+  const id = (_idReplay && _idReplay.length) ? _idReplay.shift() : crypto.randomUUID().toUpperCase();
+  if (_idCapture) _idCapture.push(id);
+  return id;
+};
+export function withIdCapture(fn) {
+  const prev = _idCapture; _idCapture = [];
+  try { const result = fn(); return { result, ids: _idCapture }; } finally { _idCapture = prev; }
+}
+export function withIdReplay(ids, fn) {
+  const prev = _idReplay; _idReplay = [...ids];
+  try { return fn(); } finally { _idReplay = prev; }
+}
 const clone = o => JSON.parse(JSON.stringify(o));
 const US = 1e6;
 
@@ -112,10 +127,14 @@ export function listDrafts() {
 }
 
 // is CapCut running? (writing while open gets clobbered by autosave)
-function capcutRunning() {
-  if (process.platform !== 'win32') return false;
-  try { return /CapCut\.exe/i.test(execSync('tasklist /FI "IMAGENAME eq CapCut.exe" /NH', { encoding: 'utf8' })); }
-  catch { return false; }
+// macOS: process name is "CapCut" by default; override with CAPCUT_PROCESS_NAME if `pgrep -lx CapCut` finds nothing.
+const MAC_PROCESS_NAME = process.env.CAPCUT_PROCESS_NAME || 'CapCut';
+export function capcutRunning() {
+  try {
+    if (process.platform === 'win32') return /CapCut\.exe/i.test(execSync('tasklist /FI "IMAGENAME eq CapCut.exe" /NH', { encoding: 'utf8' }));
+    if (process.platform === 'darwin') { execFileSync('pgrep', ['-x', MAC_PROCESS_NAME], { stdio: 'ignore' }); return true; } // pgrep exits 1 (throws) when nothing matches
+  } catch { /* not running */ }
+  return false;
 }
 
 export class CapCutDraft {
@@ -337,12 +356,15 @@ export class CapCutDraft {
     this._inUndoScope = true;
     queueMicrotask(() => { this._inUndoScope = false; });
     this._undoStack = this._undoStack || [];
-    this._undoStack.push(JSON.stringify(this.content));
+    this._undoSeq = (this._undoSeq || 0) + 1;
+    this._undoStack.push({ seq: this._undoSeq, snap: JSON.stringify(this.content) });
     if (this._undoStack.length > 20) this._undoStack.shift();
   }
   undo() {
     if (!this._undoStack || !this._undoStack.length) throw new Error('nothing to undo');
-    this.content = JSON.parse(this._undoStack.pop());
+    const top = this._undoStack.pop();
+    this.content = JSON.parse(top.snap);
+    this._lastUndoneSeq = top.seq;
     return { ok: true, remaining: this._undoStack.length };
   }
 
@@ -627,8 +649,8 @@ export class CapCutDraft {
   }
 
   // ---------- save ----------
-  save({ force = false } = {}) {
-    if (!force) {
+  save({ force = false, trusted = false } = {}) {
+    if (!force && !trusted) {
       if (fs.existsSync(path.join(this.dir, '.locked'))) throw new Error('draft is locked (open in CapCut). Close CapCut, or pass force:true. Autosave will overwrite edits made while open.');
       if (capcutRunning()) throw new Error('CapCut is running. Close it before saving, or pass force:true.');
       let onDiskMtimeMs; try { onDiskMtimeMs = fs.statSync(this.contentPath).mtimeMs; } catch {}

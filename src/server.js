@@ -10,14 +10,18 @@ import path from 'path';
 import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
-import { CapCutDraft, cloneDraft, listDrafts, DRAFTS_DIR, FILTERS, TRANSITIONS, MASKS, CAPTION_STYLES, searchCatalog, findInCatalog } from './core.js';
+import { cloneDraft, listDrafts, capcutRunning, DRAFTS_DIR, FILTERS, TRANSITIONS, MASKS, CAPTION_STYLES, searchCatalog, findInCatalog } from './core.js';
+import { JournaledSession, liveSync } from './live.js';
+import { macApp } from './mac-app.js';
 
 const KEYFRAME_PROPERTIES = ['KFTypePositionX', 'KFTypePositionY', 'KFTypeRotation', 'KFTypeScaleX', 'KFTypeScaleY', 'UNIFORM_SCALE', 'KFTypeAlpha', 'KFTypeSaturation', 'KFTypeContrast', 'KFTypeBrightness', 'KFTypeVolume'];
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = path.join(__dirname, '..');
 const CACHE_DIR = path.join(PKG_ROOT, '.transcript-cache');
-const WHISPER_PYTHON = process.env.CAPCUT_WHISPER_PYTHON || path.join(PKG_ROOT, 'vendor', 'whisper-env', 'Scripts', 'python.exe');
+const WHISPER_PYTHON = process.env.CAPCUT_WHISPER_PYTHON || (process.platform === 'win32'
+  ? path.join(PKG_ROOT, 'vendor', 'whisper-env', 'Scripts', 'python.exe')
+  : path.join(PKG_ROOT, 'vendor', 'whisper-env', 'bin', 'python'));
 const WHISPER_SCRIPT = path.join(PKG_ROOT, 'vendor', 'transcribe_local.py');
 const PROFILES_DIR = process.env.CAPCUT_PROFILES_DIR || path.join(PKG_ROOT, '..', 'perfis-criativo');
 
@@ -71,8 +75,9 @@ function readClientAccentColor(cliente) {
 }
 
 const US = 1e6;
-const open = new Map();                       // name -> live CapCutDraft (unsaved edits)
-const get = name => { if (!open.has(name)) open.set(name, new CapCutDraft(name)); return open.get(name); };
+const open = new Map();                       // name -> JournaledSession (unsaved edits + journal for live sync)
+const session = name => { if (!open.has(name)) open.set(name, new JournaledSession(name)); return open.get(name); };
+const get = name => session(name).api;
 const ok = obj => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] });
 const err = e => ({ content: [{ type: 'text', text: 'ERROR: ' + (e && e.message || e) }], isError: true });
 const wrap = fn => async (a) => { try { return ok(await fn(a)); } catch (e) { return err(e); } };
@@ -284,6 +289,28 @@ s.tool('capcut_save', 'Write session edits to disk (backs up .mcpbak, validates)
 
 s.tool('capcut_discard', 'Drop unsaved session edits and reload the draft from disk.',
   { draft: z.string() }, wrap(async ({ draft }) => { open.delete(draft); return { discarded: draft }; }));
+
+// ---------- live sync (macOS): see changes appear in the CapCut app ----------
+s.tool('capcut_live_sync', 'Push pending session edits into the CapCut app so the user can see them (macOS). Closes CapCut politely (it saves its own copy first), re-applies your edits on top of anything the user changed by hand, validates, saves with a backup, then relaunches CapCut. Call this after each meaningful batch of edits instead of capcut_save. If an edit no longer applies, nothing is written and the reason is returned.',
+  {
+    draft: z.string(),
+    relaunch: z.boolean().optional().describe('reopen CapCut afterwards (default: only if it was running)'),
+    reopen: z.boolean().optional().describe('also try to open this project in CapCut (needs CAPCUT_REOPEN_SCRIPT; default true)'),
+  },
+  wrap(async ({ draft, relaunch, reopen }) => {
+    if (process.platform !== 'darwin') throw new Error('capcut_live_sync is implemented for macOS only so far. On Windows, close CapCut and use capcut_save.');
+    const r = await liveSync(session(draft), macApp, { relaunch, reopen });
+    if (r.synced) open.delete(draft); // next edit starts from the freshly saved file
+    return r;
+  }));
+
+s.tool('capcut_live_status', 'Show whether CapCut is running, whether this draft is open in it, and how many edits are waiting to be synced.',
+  { draft: z.string() },
+  wrap(async ({ draft }) => {
+    const sess = open.get(draft);
+    const dir = sess ? sess.draft.dir : null;
+    return { draft, capcutRunning: capcutRunning(), openInCapCut: dir ? fs.existsSync(path.join(dir, '.locked')) : undefined, pendingEdits: sess ? sess.pending : 0, pendingOps: sess ? sess.journal.map(j => j.method) : [] };
+  }));
 
 const transport = new StdioServerTransport();
 await s.connect(transport);

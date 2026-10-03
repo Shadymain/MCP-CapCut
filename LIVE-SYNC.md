@@ -51,3 +51,37 @@ The script is untested against CapCut's real interface. If it reports "not found
 - **Replay addresses tracks by index.** If you add or reorder tracks in CapCut between syncs, an edit that targeted a track by index can land on the wrong track. Check after syncing.
 - **Each sync costs a few seconds.** CapCut quits and relaunches, so sync after a meaningful batch of edits, not after every single one.
 - **CapCut updates can change the draft format.** Keep the backups, and consider pausing auto-updates.
+
+## Which file holds the timeline (macOS)
+
+Each draft resolves one authoritative timeline file, in this order:
+
+1. `Timelines/<main_timeline_id>/draft_info.json` (id read from `Timelines/project.json`)
+2. root `draft_content.json` (Windows and older builds)
+3. root `draft_info.json`
+
+On save, that file is backed up to `.mcpbak` and written atomically, then every other copy that exists (root `draft_info.json`, `draft_content.json`, and both `template-2.tmp` files) gets the same content. CapCut's own `.bak` files are left alone.
+
+Verified on CapCut 9.5.0 for Mac: the server scaled a clip to 150% with CapCut closed, and CapCut opened the project showing 150%. On open, CapCut moved the saved bytes into its own `draft_info.json.bak` and rewrote all four timeline copies with its own formatting, keeping the edit.
+
+## Registering the server
+
+Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+"mcpServers": {
+  "capcut": {
+    "command": "/usr/local/bin/node",
+    "args": ["/absolute/path/to/MCP-CapCut/src/server.js"],
+    "env": { "CAPCUT_TEMPLATE_DRAFT": "sandbox" }
+  }
+}
+```
+
+Claude Code:
+
+```bash
+claude mcp add --scope user capcut -e CAPCUT_TEMPLATE_DRAFT=sandbox -- "$(which node)" /absolute/path/to/MCP-CapCut/src/server.js
+```
+
+`CAPCUT_TEMPLATE_DRAFT` names a project folder with at least a video clip and a text layer; the server copies clip and track structure from it when the draft being edited lacks one.

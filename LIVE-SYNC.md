@@ -29,10 +29,28 @@ If one of Claude's edits no longer applies (for example, you deleted the clip it
 
 ## Tools added
 
-- **`capcut_live_sync`** `{ draft, relaunch?, reopen? }`: pushes pending edits into the app.
+- **`capcut_live_sync`** `{ draft, relaunch?, reopen?, mode? }`: pushes pending edits into the app. `mode` is `quit` or `close` (see below) and overrides `CAPCUT_SYNC_MODE`.
 - **`capcut_live_status`** `{ draft }`: shows whether CapCut is running, whether the draft is open in it, and how many edits are pending.
 
-## Auto-reopening the project (experimental)
+## Close mode: keep CapCut open (experimental)
+
+Set `CAPCUT_SYNC_MODE=close` (or pass `mode: "close"`) to swap the quit and relaunch for closing just the project:
+
+1. Clicks **CapCut > Back to home page**. CapCut saves its own copy and removes `.locked`, usually within a second, and stays open on its home screen.
+2. Waits for the timeline file to settle, re-applies Claude's edits on top of yours, validates and saves, as in quit mode.
+3. Double-clicks the project's tile on the home screen and confirms it opened by watching `.locked` come back.
+
+CapCut reads the project from disk when it opens it, so the saved edits show up. This was checked on CapCut 9.5.0 for Mac: a text layer moved on disk while CapCut sat on its home screen appeared in its new spot on reopen.
+
+Needs Accessibility for Claude (System Settings > Privacy & Security > Accessibility). CapCut only exposes its window to Accessibility while it is the frontmost app, so the sync brings it to the front.
+
+**Fallbacks.** If Back to home page fails or CapCut keeps `.locked`, the sync quits CapCut instead, like quit mode, and says so (`fellBack: true`). If the reopen fails, the edits are already saved and you're asked to click the project. If CapCut is running without this project open, it's left alone. If the project gets opened again while the sync is writing, nothing is written.
+
+**How the tile is found.** The home screen's project tiles carry no names for Accessibility, so the project is located by its place in CapCut's newest-first order, read from `root_meta_info.json`. If a different project opens, the sync goes back to the home screen and asks you to click. A tile scrolled out of view, or a different sort order on the home screen, ends the same way.
+
+Quit mode stays the default until close mode has had more real runs.
+
+## Auto-reopening the project after a relaunch (experimental)
 
 After a relaunch, CapCut opens on its home screen and you click the project. To try automating that click:
 
@@ -49,7 +67,7 @@ The script is untested against CapCut's real interface. If it reports "not found
 ## Known limits
 
 - **Replay addresses tracks by index.** If you add or reorder tracks in CapCut between syncs, an edit that targeted a track by index can land on the wrong track. Check after syncing.
-- **Each sync costs a few seconds.** CapCut quits and relaunches, so sync after a meaningful batch of edits, not after every single one.
+- **Each sync costs a few seconds.** In quit mode CapCut quits and relaunches. Close mode is quicker (about 3 s on CapCut 9.5) but still brings CapCut to the front. Either way, sync after a meaningful batch of edits, not after every single one.
 - **CapCut updates can change the draft format.** Keep the backups, and consider pausing auto-updates.
 
 ## Which file holds the timeline (macOS)

@@ -4,12 +4,13 @@
 // silently overwriting anything written to its timeline file underneath it.
 //
 // The fix: every editing tool call is journaled (method + args + the ids it generated). To sync:
-//   1. ask CapCut to quit (it flushes ITS copy -- including anything you changed by hand)
+//   1. ask CapCut to quit, or with CAPCUT_SYNC_MODE=close just leave the project (either way it
+//      flushes ITS copy -- including anything you changed by hand)
 //   2. wait for the file to settle
 //   3. if the file changed since we loaded it, reload it and REPLAY the journal on top
 //      (same ids, so later edits that refer to clips created earlier still line up)
 //   4. validate + save atomically (backup first)
-//   5. relaunch CapCut (and optionally reopen the project)
+//   5. relaunch CapCut, or reopen the project (close mode)
 // If a replayed edit no longer applies (e.g. you deleted the clip it targets), nothing is written.
 import fs from 'fs';
 import path from 'path';
@@ -91,34 +92,60 @@ export class JournaledSession {
   }
 }
 
-// app: { isRunning(), quit(), waitForSettle(contentPath, lockDir), launch(), reopenProject(name) } -- see mac-app.js
-export async function liveSync(session, app, { relaunch, reopen = true } = {}) {
-  const result = { draft: session.name, pendingEdits: session.pending, steps: [] };
+// app: { isRunning(), quit(), waitForSettle(contentPath, lockDir), launch(), reopenProject(name),
+//        isProjectOpen(dir), closeProject(dir), openProject(name, dir) } -- see mac-app.js
+// mode 'quit' (default): quit CapCut, write, relaunch. mode 'close': leave just this project (CapCut
+// stays open on its home screen), write, reopen it -- falling back to 'quit' if CapCut won't let go.
+export async function liveSync(session, app, { relaunch, reopen = true, mode = process.env.CAPCUT_SYNC_MODE || 'quit' } = {}) {
+  if (mode !== 'quit' && mode !== 'close') throw new Error(`unknown sync mode "${mode}" (use "quit" or "close")`);
+  const result = { draft: session.name, pendingEdits: session.pending, mode, steps: [] };
   if (!session.pending) return { ...result, synced: false, note: 'no pending edits to sync' };
 
+  const dir = session.draft.dir;
   const wasRunning = app.isRunning();
+  // how CapCut let go of the project: 'quit' (quit, or wasn't running), 'close' (back to home), 'none' (running, project not open)
+  let via = 'quit';
+  if (wasRunning && mode === 'close') {
+    if (!app.isProjectOpen(dir)) { via = 'none'; result.steps.push('CapCut is running without this project open -- left it alone'); }
+    else {
+      try { await app.closeProject(dir); via = 'close'; result.steps.push('closed the project in CapCut (it saved its own copy first); CapCut stayed open'); }
+      catch (e) { result.fellBack = true; result.steps.push(`couldn't close just the project (${e.message}) -- quitting CapCut instead`); }
+    }
+  }
+  result.via = via;
+
   const shouldRelaunch = relaunch ?? wasRunning;
-  const relaunchApp = async () => {
+  const restoreApp = async () => {
+    if (via === 'none') return;
+    if (via === 'close') {
+      if (!reopen) { result.hint = `CapCut is on its home screen -- click "${session.name}" to see the changes.`; return; }
+      const r = await app.openProject(session.name, dir); result.reopened = r.reopened; if (r.hint) result.hint = r.hint;
+      if (r.reopened) result.steps.push('reopened the project in CapCut');
+      return;
+    }
     if (!shouldRelaunch) return;
     await app.launch(); result.steps.push('relaunched CapCut');
     if (reopen) { const r = await app.reopenProject(session.name); result.reopened = r.reopened; if (r.hint) result.hint = r.hint; }
   };
 
-  if (wasRunning) { await app.quit(); result.steps.push('closed CapCut (it saved its own copy first)'); }
-  const settle = await app.waitForSettle(session.draft.contentPath, session.draft.dir);
+  if (wasRunning && via === 'quit') { await app.quit(); result.steps.push('closed CapCut (it saved its own copy first)'); }
+  const settle = await app.waitForSettle(session.draft.contentPath, dir);
   if (settle?.staleLock) result.steps.push('note: a stale .locked file is left over from CapCut; ignored because CapCut is not running');
 
   const onDisk = fs.statSync(session.draft.contentPath).mtimeMs;
   if (onDisk !== session.draft._loadedMtimeMs) {
     try { session.rebase(); result.rebased = true; result.steps.push(`project changed in CapCut -- reloaded it and re-applied ${session.pending} edit(s) on top`); }
-    catch (e) { await relaunchApp(); e.message = `nothing was written. ${e.message} Use capcut_discard and redo the edit, or undo your change in CapCut and sync again.`; throw e; }
+    catch (e) { await restoreApp(); e.message = `nothing was written. ${e.message} Use capcut_discard and redo the edit, or undo your change in CapCut and sync again.`; throw e; }
   }
+
+  // CapCut stayed running, so someone may have opened the project again while we were busy.
+  if (via !== 'quit' && app.isProjectOpen(dir)) throw new Error('nothing was written: the project was opened in CapCut during the sync. Sync again.');
 
   let saved;
   try { saved = session.api.save({ trusted: true }); }
-  catch (e) { await relaunchApp(); e.message = `nothing was written. ${e.message}`; throw e; }
+  catch (e) { await restoreApp(); e.message = `nothing was written. ${e.message}`; throw e; }
   result.steps.push(`validated and saved ${path.basename(session.draft.contentPath)} (backup at .mcpbak)`);
   result.synced = true; result.saved = saved;
-  await relaunchApp();
+  await restoreApp();
   return result;
 }

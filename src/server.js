@@ -291,15 +291,16 @@ s.tool('capcut_discard', 'Drop unsaved session edits and reload the draft from d
   { draft: z.string() }, wrap(async ({ draft }) => { open.delete(draft); return { discarded: draft }; }));
 
 // ---------- live sync (macOS): see changes appear in the CapCut app ----------
-s.tool('capcut_live_sync', 'Push pending session edits into the CapCut app so the user can see them (macOS). Closes CapCut politely (it saves its own copy first), re-applies your edits on top of anything the user changed by hand, validates, saves with a backup, then relaunches CapCut. Call this after each meaningful batch of edits instead of capcut_save. If an edit no longer applies, nothing is written and the reason is returned.',
+s.tool('capcut_live_sync', 'Push pending session edits into the CapCut app so the user can see them (macOS). Closes CapCut politely (it saves its own copy first), re-applies your edits on top of anything the user changed by hand, validates, saves with a backup, then relaunches CapCut. With mode "close" (or CAPCUT_SYNC_MODE=close) it only leaves the project and reopens it, so CapCut never quits; it falls back to quitting if that fails. Call this after each meaningful batch of edits instead of capcut_save. If an edit no longer applies, nothing is written and the reason is returned.',
   {
     draft: z.string(),
     relaunch: z.boolean().optional().describe('reopen CapCut afterwards (default: only if it was running)'),
-    reopen: z.boolean().optional().describe('also try to open this project in CapCut (needs CAPCUT_REOPEN_SCRIPT; default true)'),
+    reopen: z.boolean().optional().describe('also try to open this project in CapCut (close mode, or quit mode with CAPCUT_REOPEN_SCRIPT; default true)'),
+    mode: z.enum(['quit', 'close']).optional().describe('quit: quit and relaunch CapCut. close: leave just this project and reopen it (needs Accessibility). Default: CAPCUT_SYNC_MODE, else quit'),
   },
-  wrap(async ({ draft, relaunch, reopen }) => {
+  wrap(async ({ draft, relaunch, reopen, mode }) => {
     if (process.platform !== 'darwin') throw new Error('capcut_live_sync is implemented for macOS only so far. On Windows, close CapCut and use capcut_save.');
-    const r = await liveSync(session(draft), macApp, { relaunch, reopen });
+    const r = await liveSync(session(draft), macApp, { relaunch, reopen, ...(mode && { mode }) });
     if (r.synced) open.delete(draft); // next edit starts from the freshly saved file
     return r;
   }));

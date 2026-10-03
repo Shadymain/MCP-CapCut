@@ -4,8 +4,10 @@ import fs from 'fs'; import os from 'os'; import path from 'path'; import assert
 import { makeDraft, NESTED_ID } from './make-draft.mjs';
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-live-test-'));
 process.env.CAPCUT_DRAFTS_DIR = ROOT; // must be set before core.js loads
+delete process.env.CAPCUT_SYNC_MODE; // tests choose the mode explicitly
 const { JournaledSession, liveSync } = await import('../src/live.js');
 const { CapCutDraft, listDrafts, cloneDraft } = await import('../src/core.js');
+const { homeTileIndex } = await import('../src/mac-app.js');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const read = dir => JSON.parse(fs.readFileSync(path.join(dir, 'draft_content.json'), 'utf8'));
 const segs = c => c.tracks.flatMap(t => t.segments);
@@ -141,5 +143,103 @@ function fakeApp(onQuit) { let running = true; return { log: [], isRunning: () =
   cloneDraft('p8', 'p8-clone');
   assert.equal(new CapCutDraft('p8-clone').contentPath, path.join(ROOT, 'p8-clone', 'Timelines', NESTED_ID, 'draft_info.json'));
   console.log('PASS 8 nested Timelines layout:', r.steps.join(' | '));
+}
+// ---- close mode: CapCut leaves just the project (on its home screen) instead of quitting ----
+// project open <=> .locked exists, like the real app. onClose runs while CapCut flushes its copy.
+function fakeCloseApp(dir, { onClose, closeFails, openWorks = true } = {}) {
+  const lock = path.join(dir, '.locked'); fs.writeFileSync(lock, '');
+  const app = fakeApp(); app.log = [];
+  app.isProjectOpen = d => fs.existsSync(path.join(d, '.locked'));
+  app.closeProject = async () => { app.log.push('close'); if (closeFails) throw new Error('menu item missing'); onClose?.(); fs.rmSync(lock); };
+  app.openProject = async n => { app.log.push('open'); if (!openWorks) return { reopened: false, hint: 'click ' + n }; fs.writeFileSync(lock, ''); return { reopened: true }; };
+  const quit = app.quit; app.quit = async function () { await quit.call(this); fs.rmSync(lock, { force: true }); };
+  return app;
+}
+
+// ---- 9. close mode happy path: hand edit flushed on close is kept, CapCut never quits ----
+{
+  const dir = makeDraft(ROOT, 'p9');
+  const sess = new JournaledSession('p9');
+  sess.api.setProps('SEG1', { scale: 1.3 }); await tick();
+  await sleep(20);
+  const app = fakeCloseApp(dir, { onClose: () => { const c = read(dir); segs(c).find(s => s.id === 'SEG2').clip.rotation = 30; fs.writeFileSync(path.join(dir, 'draft_content.json'), JSON.stringify(c)); } });
+  const r = await liveSync(sess, app, { mode: 'close' });
+  assert.ok(r.synced && r.rebased && r.reopened, 'synced, rebased, reopened');
+  assert.equal(r.via, 'close');
+  assert.deepEqual(app.log, ['close', 'settle', 'open'], 'no quit, no launch');
+  assert.ok(app.isRunning(), 'CapCut still running');
+  const byId = Object.fromEntries(segs(read(dir)).map(s => [s.id, s]));
+  assert.equal(byId.SEG1.clip.scale.x, 1.3); assert.equal(byId.SEG2.clip.rotation, 30);
+  console.log('PASS 9 close mode:', r.steps.join(' | '));
+}
+
+// ---- 10. close mode, leaving the project fails -> falls back to quit + relaunch ----
+{
+  const dir = makeDraft(ROOT, 'p10');
+  const sess = new JournaledSession('p10');
+  sess.api.setProps('SEG1', { scale: 1.4 }); await tick();
+  const app = fakeCloseApp(dir, { closeFails: true });
+  const r = await liveSync(sess, app, { mode: 'close' });
+  assert.ok(r.synced && r.fellBack); assert.equal(r.via, 'quit');
+  assert.deepEqual(app.log, ['close', 'quit', 'settle', 'launch', 'reopen']);
+  assert.equal(segs(read(dir))[0].clip.scale.x, 1.4);
+  console.log('PASS 10 close-mode fallback to quit');
+}
+
+// ---- 11. close mode, CapCut running but this project not open -> CapCut left alone ----
+{
+  const dir = makeDraft(ROOT, 'p11');
+  const sess = new JournaledSession('p11');
+  sess.api.setProps('SEG1', { scale: 1.1 }); await tick();
+  const app = fakeCloseApp(dir); fs.rmSync(path.join(dir, '.locked'));
+  const r = await liveSync(sess, app, { mode: 'close' });
+  assert.ok(r.synced); assert.equal(r.via, 'none');
+  assert.deepEqual(app.log, ['settle']);
+  console.log('PASS 11 close mode, project not open');
+}
+
+// ---- 12. close mode conflict -> nothing written, project reopened (no relaunch) ----
+{
+  const dir = makeDraft(ROOT, 'p12');
+  const sess = new JournaledSession('p12');
+  sess.api.setProps('SEG2', { opacity: 0.3 }); await tick();
+  await sleep(20);
+  let flushed;
+  const app = fakeCloseApp(dir, { onClose: () => { const c = read(dir); c.tracks[0].segments = c.tracks[0].segments.filter(s => s.id !== 'SEG2'); flushed = JSON.stringify(c); fs.writeFileSync(path.join(dir, 'draft_content.json'), flushed); } });
+  await assert.rejects(liveSync(sess, app, { mode: 'close' }), e => /nothing was written/.test(e.message) && e.conflict?.method === 'setProps');
+  assert.equal(fs.readFileSync(path.join(dir, 'draft_content.json'), 'utf8'), flushed, 'file untouched');
+  assert.deepEqual(app.log, ['close', 'settle', 'open']);
+  console.log('PASS 12 close-mode conflict reopens the project');
+}
+
+// ---- 13. close mode: user reopens the project mid-sync -> nothing written ----
+{
+  const dir = makeDraft(ROOT, 'p13');
+  const sess = new JournaledSession('p13');
+  sess.api.setProps('SEG1', { scale: 1.6 }); await tick();
+  const orig = fs.readFileSync(path.join(dir, 'draft_content.json'), 'utf8');
+  const app = fakeCloseApp(dir);
+  app.waitForSettle = async () => { app.log.push('settle'); fs.writeFileSync(path.join(dir, '.locked'), ''); return { staleLock: false }; };
+  await assert.rejects(liveSync(sess, app, { mode: 'close' }), /opened in CapCut during the sync/);
+  assert.equal(fs.readFileSync(path.join(dir, 'draft_content.json'), 'utf8'), orig);
+  assert.equal(sess.pending, 1, 'journal kept');
+  console.log('PASS 13 reopened-during-sync guard');
+}
+
+// ---- 14. mode validation + home-screen tile order ----
+{
+  makeDraft(ROOT, 'p14'); const sess = new JournaledSession('p14');
+  sess.api.setProps('SEG1', { scale: 1.2 }); await tick();
+  await assert.rejects(liveSync(sess, fakeApp(), { mode: 'bogus' }), /unknown sync mode/);
+  const meta = { all_draft_store: [
+    { draft_fold_path: '/p/old', tm_draft_modified: 1 },
+    { draft_fold_path: '/p/hidden', tm_draft_modified: 9, draft_is_invisible: true },
+    { draft_fold_path: '/p/trashed', tm_draft_modified: 8, tm_draft_removed: 5 },
+    { draft_fold_path: '/p/new', tm_draft_modified: 3 },
+    { draft_fold_path: '/p/mid', tm_draft_modified: 2 },
+  ] };
+  assert.equal(homeTileIndex(meta, '/p/new'), 0); assert.equal(homeTileIndex(meta, '/p/mid'), 1); assert.equal(homeTileIndex(meta, '/p/old'), 2);
+  assert.equal(homeTileIndex(meta, '/p/hidden'), -1); assert.equal(homeTileIndex(meta, '/p/missing'), -1); assert.equal(homeTileIndex(null, '/p/new'), -1);
+  console.log('PASS 14 mode validation + tile order');
 }
 console.log('\nALL LIVE-SYNC TESTS PASSED');

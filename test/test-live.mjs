@@ -8,6 +8,7 @@ delete process.env.CAPCUT_SYNC_MODE; // tests choose the mode explicitly
 const { JournaledSession, liveSync } = await import('../src/live.js');
 const { CapCutDraft, listDrafts, cloneDraft } = await import('../src/core.js');
 const { homeTileIndex } = await import('../src/mac-app.js');
+const { describeHelperFailure } = await import('../src/helper.js');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const read = dir => JSON.parse(fs.readFileSync(path.join(dir, 'draft_content.json'), 'utf8'));
 const segs = c => c.tracks.flatMap(t => t.segments);
@@ -241,5 +242,17 @@ function fakeCloseApp(dir, { onClose, closeFails, openWorks = true } = {}) {
   assert.equal(homeTileIndex(meta, '/p/new'), 0); assert.equal(homeTileIndex(meta, '/p/mid'), 1); assert.equal(homeTileIndex(meta, '/p/old'), 2);
   assert.equal(homeTileIndex(meta, '/p/hidden'), -1); assert.equal(homeTileIndex(meta, '/p/missing'), -1); assert.equal(homeTileIndex(null, '/p/new'), -1);
   console.log('PASS 14 mode validation + tile order');
+}
+// ---- 15. helper failures read as the permission to grant, never as a blank message ----
+{
+  assert.equal(describeHelperFailure({ ok: true, axTrusted: true, results: [] }), null);
+  assert.match(describeHelperFailure(null), /no result/);
+  const fail = (error, axTrusted = true) => describeHelperFailure({ ok: false, axTrusted, results: [], error });
+  assert.match(fail({ step: 1, op: 'clickMenu', number: -1743, message: 'Not authorized' }), /step 2 \(clickMenu\).*Automation/);
+  assert.match(fail({ step: 1, op: 'clickMenu', number: -25211, message: 'assistive access' }), /Accessibility/);
+  assert.match(fail({ step: 0, op: 'mouseClick', message: 'x' }, false), /Accessibility/);
+  assert.match(fail({ step: 1, op: 'clickMenu', number: -1728, message: "Can't get menu item" }), /failed at step 2 \(clickMenu\): Can't get menu item \(-1728\)/);
+  assert.match(fail({ step: 0, op: 'delay', message: 'request expired' }, false), /request expired/);
+  console.log('PASS 15 helper failure messages');
 }
 console.log('\nALL LIVE-SYNC TESTS PASSED');

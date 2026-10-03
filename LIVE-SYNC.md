@@ -25,7 +25,7 @@ If one of Claude's edits no longer applies (for example, you deleted the clip it
 
 3. Run `npm test`. This runs the live-sync tests against a fake CapCut and never touches your projects.
 
-4. The first time you sync, macOS asks whether Claude may control CapCut. Click **OK**. If you missed it, allow it in System Settings → Privacy & Security → Automation.
+4. The first time you sync, macOS asks whether node may control CapCut. Click **OK**. If you missed it, allow it in System Settings → Privacy & Security → Automation.
 
 ## Tools added
 
@@ -42,7 +42,22 @@ Set `CAPCUT_SYNC_MODE=close` (or pass `mode: "close"`) to swap the quit and rela
 
 CapCut reads the project from disk when it opens it, so the saved edits show up. This was checked on CapCut 9.5.0 for Mac: a text layer moved on disk while CapCut sat on its home screen appeared in its new spot on reopen.
 
-Needs Accessibility for Claude (System Settings > Privacy & Security > Accessibility). CapCut only exposes its window to Accessibility while it is the frontmost app, so the sync brings it to the front.
+CapCut only exposes its window to Accessibility while it is the frontmost app, so the sync brings it to the front.
+
+### The sync helper (permissions)
+
+Claude starts MCP servers as their own "responsible process", so macOS checks permissions against `/usr/local/bin/node` itself, not Claude. Granting node Accessibility would cover every Node script on the Mac. Instead, close mode does its clicks through a small applet, **CapCut Sync Helper**, and only the helper needs permission.
+
+1. Install it (skipped when the source hasn't changed, so its permissions survive):
+   ```bash
+   scripts/install-helper.sh
+   ```
+   It goes to `~/Applications/CapCut Sync Helper.app` (override with `CAPCUT_SYNC_HELPER`).
+2. In System Settings > Privacy & Security:
+   - **Accessibility:** turn on **CapCut Sync Helper**.
+   - **Automation:** under **CapCut Sync Helper**, turn on **System Events** (macOS asks the first time).
+
+The server talks to the helper through files in `~/Library/Application Support/CapCut Sync Helper/`: it writes `request.json` (a list of generic steps such as `clickMenu` and `mouseClick`), launches the helper with `open`, and waits for `result.json`. Everything CapCut-specific lives in the request, so the helper rarely needs rebuilding; a rebuild changes its signature and macOS asks for permission again. The old Accessibility entry stays in the list, switched on but no longer matching (the sync reports "macOS blocked Accessibility"): remove **CapCut Sync Helper** there with **–** and add `~/Applications/CapCut Sync Helper.app` again with **+**. A request that times out expires inside the helper, so answering a permission prompt late never clicks anything. If the helper is still waiting when the sync gives up, the sync reports "waiting on a macOS permission prompt" and falls back to quitting.
 
 **Fallbacks.** If Back to home page fails or CapCut keeps `.locked`, the sync quits CapCut instead, like quit mode, and says so (`fellBack: true`). If the reopen fails, the edits are already saved and you're asked to click the project. If CapCut is running without this project open, it's left alone. If the project gets opened again while the sync is writing, nothing is written.
 

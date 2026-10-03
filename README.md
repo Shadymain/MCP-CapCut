@@ -57,7 +57,8 @@ All times at the tool boundary are in **seconds** (converted to CapCut's microse
 | `capcut_read_timeline` | full read: canvas, fps, tracks, every segment (reflects pending session edits) |
 | `capcut_clone_draft` | copy a draft (optionally emptied) for a fresh build |
 | `capcut_add_video / _image / _audio` | place media on a track. Omit `atSec` to append right after the last clip on that track — no running-total math needed for a sequence of clips |
-| `capcut_add_text` | text overlay (needs a text template draft). Omit `atSec` to append too |
+| `capcut_add_text` | text overlay (needs a text template draft). Omit `atSec` to append too. `styleFrom: <segmentId>` clones an existing text layer in the draft (font, stroke, shadow, transform) and changes only the words, colour, size, position and `letterSpacing` |
+| `capcut_add_line` | thin solid-colour divider: generates a PNG (in `CAPCUT_ASSETS_DIR`, default `~/.capcut-mcp/assets`) and places it on a `lines` video track at exactly `lengthPx` × `thicknessPx` canvas pixels |
 | `capcut_add_track` | new video/audio/text/sticker track |
 | `capcut_set_track_mute` | mute/unmute an entire track — a track cloned from a muted template starts muted with no visible sign of it besides this field |
 | `capcut_move_segment` | change start time / track |

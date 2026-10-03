@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/test-live.mjs"
+    "test": "node test/test-live.mjs && node test/test-text-lines.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

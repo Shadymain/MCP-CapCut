@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
+import zlib from 'zlib';
 import { execSync, execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
@@ -242,8 +243,8 @@ export class CapCutDraft {
     if (!tpl) throw new Error(`no ${kind} template available`);
     const dur = opts.durUs != null ? opts.durUs : probeDur(file);
     const mat = clone(tpl.mat); mat.id = uid(); mat.path = file.replace(/\\/g, '/'); mat.material_name = path.basename(file); mat.type = type;
-    if (kind !== 'audio') { const { w, h } = probeWH(file); mat.width = w; mat.height = h; }
-    mat.duration = probeDur(file); // always the real file's own duration, never the cloned template's stale value
+    if (kind !== 'audio') { const { w, h } = opts.size || probeWH(file); mat.width = w; mat.height = h; }
+    mat.duration = opts.size ? (opts.durUs || 5 * US) : probeDur(file); // always the real file's own duration, never the cloned template's stale value
     ['local_material_id', 'origin_material_id', 'local_id', 'request_id', 'aigc_history_id', 'aigc_item_id'].forEach(k => { if (k in mat) mat[k] = ''; });
     const matKey = kind === 'audio' ? 'audios' : (kind === 'image' ? 'videos' : 'videos'); // CapCut stores images in videos[]
     this._mats(matKey).push(mat);
@@ -265,25 +266,47 @@ export class CapCutDraft {
   addAudio(file, opts = {}) { return this._addMedia('audio', file, opts); }
 
   // ---------- text ----------
+  // the text segment (+material +refs) a new text layer is cloned from: a specific layer in this draft
+  // when opts.styleFrom names one (so its font/stroke/shadow/etc. carry over), else the harvested template
+  _textSource(styleFrom) {
+    if (!styleFrom) {
+      const tpl = this.templates().text;
+      if (!tpl) throw new Error('no text template found. Set CAPCUT_TEMPLATE_DRAFT to a draft that contains a text layer.');
+      return tpl;
+    }
+    const { s } = this._find(styleFrom);
+    const [k, mat] = findMat(this.content, s.material_id);
+    if (k !== 'texts') throw new Error(`segment ${styleFrom} is not a text layer`);
+    const refs = (s.extra_material_refs || []).map(id => { const [rk, m] = findMat(this.content, id); return m ? { k: rk, m } : null; }).filter(Boolean);
+    return { seg: s, mat, refs };
+  }
   addText(text, opts = {}) {
     this._pushUndo();
-    const tpl = this.templates().text;
-    if (!tpl) throw new Error('no text template found. Set CAPCUT_TEMPLATE_DRAFT to a draft that contains a text layer.');
+    if (!text) throw new Error('text must not be empty');
+    const tpl = this._textSource(opts.styleFrom);
     const mat = clone(tpl.mat); mat.id = uid();
     try {
       const content = JSON.parse(mat.content);
       content.text = text;
-      if (content.styles && content.styles[0]) {
-        content.styles[0].range = [0, text.length];
-        if (opts.color) content.styles[0].fill = { content: { solid: { color: hexToRgb(opts.color) } } };
-        if (opts.fontSize) content.styles[0].size = opts.fontSize;
+      // one style run over the whole new text, keeping the source's first run (font, fill, effects)
+      const style = (content.styles && content.styles[0]) ? content.styles[0] : null;
+      if (style) {
+        style.range = [0, text.length];
+        if (opts.color) style.fill = { ...(style.fill || {}), content: { ...(style.fill?.content || {}), render_type: 'solid', solid: { alpha: 1, color: hexToRgb(opts.color) } } };
+        if (opts.fontSize) style.size = opts.fontSize;
+        content.styles = [style];
       }
       mat.content = JSON.stringify(content);
     } catch { mat.content = JSON.stringify({ text, styles: [{ range: [0, text.length], size: opts.fontSize || 15, fill: { content: { solid: { color: hexToRgb(opts.color || '#ffffff') } } } }] }); }
+    // CapCut also mirrors colour/size on the material itself
+    if (opts.color) mat.text_color = opts.color.toUpperCase();
+    if (opts.fontSize) mat.font_size = opts.fontSize;
+    if (opts.letterSpacing != null) mat.letter_spacing = opts.letterSpacing;
     this._mats('texts').push(mat);
     const refs = tpl.refs.filter(({ k }) => !CONTAMINATING_REF_KINDS.has(k)).map(({ k, m }) => { const c = clone(m); c.id = uid(); this._mats(k).push(c); return c.id; });
     const seg = clone(tpl.seg); seg.id = uid(); seg.material_id = mat.id; seg.extra_material_refs = refs;
-    const dur = opts.durUs || 3 * US;
+    if (opts.styleFrom) delete seg.common_keyframes; // the source layer's animation is not part of its style
+    const dur = opts.durUs || (opts.styleFrom ? tpl.seg.target_timerange.duration : 3 * US);
     const track = this._resolveTrack(opts, 'text');
     const at = opts.atUs != null ? opts.atUs : this._trackEnd(track); // omit atSec to append right after the last text on this track
     seg.target_timerange = { start: at, duration: dur };
@@ -294,6 +317,26 @@ export class CapCutDraft {
     track.segments.push(seg);
     this.content.duration = Math.max(this.content.duration || 0, at + dur);
     return { segmentId: seg.id, atSec: at / US, endUs: at + dur };
+  }
+
+  // ---------- solid line (divider) ----------
+  // Renders a lengthPx x thicknessPx PNG of one colour and places it as an image layer sized to exactly
+  // that many canvas pixels. CapCut fits an image inside the canvas (contain) at scale 1, so the clip
+  // scale undoes that fit. vertical:true swaps the axes.
+  addLine(opts = {}) {
+    this._pushUndo();
+    const color = opts.color || '#ffffff';
+    const lengthPx = Math.round(opts.lengthPx || 600), thicknessPx = Math.max(1, Math.round(opts.thicknessPx || 2));
+    const [w, h] = opts.vertical ? [thicknessPx, lengthPx] : [lengthPx, thicknessPx];
+    const file = writeSolidPng(color, w, h);
+    // overlay lines go on their own "lines" video track (made on first use), never onto the main clip track
+    let trackIndex = opts.trackIndex;
+    if (trackIndex == null) { const i = this.content.tracks.findIndex(t => t.type === 'video' && t.name === 'lines'); trackIndex = i >= 0 ? i : this.addTrack('video', 'lines'); }
+    const r = this._addMedia('image', file, { ...opts, trackIndex, scale: undefined, durUs: opts.durUs ?? 5 * US, size: { w, h } });
+    const cw = this.content.canvas_config?.width || 1920, ch = this.content.canvas_config?.height || 1080;
+    const fit = Math.min(cw / w, ch / h);
+    this._applyProps(this._find(r.segmentId).s, { scale: +(1 / fit).toFixed(6) });
+    return { ...r, file, widthPx: w, heightPx: h };
   }
 
   // ---------- edit existing segments ----------
@@ -706,6 +749,33 @@ export function cloneDraft(base, newName, { empty = false } = {}) {
     for (const p of [d.contentPath, ...resolveTimelineFiles(dst).mirrors]) fs.writeFileSync(p, data);
   }
   return { created: newName, dir: dst };
+}
+
+// ---- solid-colour PNG for addLine (no image library needed: an RGBA PNG is just zlib-compressed rows) ----
+export const ASSETS_DIR = process.env.CAPCUT_ASSETS_DIR || path.join(os.homedir(), '.capcut-mcp', 'assets');
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crc32 = buf => { let c = 0xFFFFFFFF; for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+function pngChunk(type, data) {
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+  const td = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+  const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td));
+  return Buffer.concat([len, td, crc]);
+}
+export function solidPng(hex, w, h) {
+  const h6 = String(hex).replace('#', '');
+  if (!/^[0-9a-f]{6}$/i.test(h6)) throw new Error(`invalid colour ${hex} (use #rrggbb)`);
+  if (!(w >= 1 && h >= 1 && w <= 8192 && h <= 8192)) throw new Error(`invalid line size ${w}x${h}`);
+  const px = [0, 2, 4].map(i => parseInt(h6.slice(i, i + 2), 16)).concat(255);
+  const row = Buffer.alloc(1 + w * 4); for (let x = 0; x < w; x++) row.set(px, 1 + x * 4); // filter byte 0, then RGBA
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr.set([8, 6, 0, 0, 0], 8); // 8-bit RGBA
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk('IHDR', ihdr), pngChunk('IDAT', zlib.deflateSync(Buffer.concat(Array(h).fill(row)))), pngChunk('IEND', Buffer.alloc(0))]);
+}
+// deterministic name, so replaying an addLine during live sync points at the same file
+function writeSolidPng(hex, w, h) {
+  fs.mkdirSync(ASSETS_DIR, { recursive: true });
+  const file = path.join(ASSETS_DIR, `line_${String(hex).replace('#', '').toLowerCase()}_${w}x${h}.png`);
+  if (!fs.existsSync(file)) writeAtomic(file, solidPng(hex, w, h));
+  return file;
 }
 
 function hexToRgb(hex) { const h = hex.replace('#', ''); return [parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255]; }

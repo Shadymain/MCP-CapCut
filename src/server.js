@@ -132,11 +132,20 @@ s.tool('capcut_add_audio', 'Add an audio clip at a time on a track.',
   { draft: z.string(), file: z.string(), ...placeOpts },
   wrap(async (a) => get(a.draft).addAudio(a.file, optsFrom(a))));
 
-s.tool('capcut_add_text', 'Add a text overlay. Requires a text template (a draft with a text layer; see CAPCUT_TEMPLATE_DRAFT).',
-  { draft: z.string(), text: z.string(), atSec: z.number().optional().describe('omit to append right after the last text on the target track'), durSec: z.number().optional(),
+s.tool('capcut_add_text', 'Add a text overlay. By default it clones the text template (a draft with a text layer; see CAPCUT_TEMPLATE_DRAFT). Pass styleFrom (a text segment id in this draft) to clone THAT layer instead -- its font, stroke, shadow, background and transform carry over, and only the words plus whatever colour/size/position/letter spacing you pass change.',
+  { draft: z.string(), text: z.string(), atSec: z.number().optional().describe('omit to append right after the last text on the target track'), durSec: z.number().optional().describe('default 3s, or the styleFrom layer\'s own duration'),
     fontSize: z.number().optional(), color: z.string().optional().describe('hex e.g. #ffffff'),
+    letterSpacing: z.number().optional().describe('CapCut letter spacing (0 = normal; around 0.1-0.3 reads as wide tracking)'),
+    styleFrom: z.string().optional().describe('segment id of an existing text layer whose style to copy'),
     posX: z.number().optional(), posY: z.number().optional(), trackIndex: z.number().int().optional() },
-  wrap(async (a) => get(a.draft).addText(a.text, { atUs: sec(a.atSec), durUs: sec(a.durSec), fontSize: a.fontSize, color: a.color, posX: a.posX, posY: a.posY, trackIndex: a.trackIndex })));
+  wrap(async (a) => get(a.draft).addText(a.text, { atUs: sec(a.atSec), durUs: sec(a.durSec), fontSize: a.fontSize, color: a.color, letterSpacing: a.letterSpacing, styleFrom: a.styleFrom, posX: a.posX, posY: a.posY, trackIndex: a.trackIndex })));
+
+s.tool('capcut_add_line', 'Add a thin solid-colour line (divider): generates a PNG of that colour and places it as an image layer exactly lengthPx x thicknessPx canvas pixels. posX/posY are CapCut\'s -1..1 canvas coordinates, like every other placement tool.',
+  { draft: z.string(), color: z.string().optional().describe('hex e.g. #e8a33d (default white)'), lengthPx: z.number().positive().optional().describe('default 600'),
+    thicknessPx: z.number().positive().optional().describe('default 2'), vertical: z.boolean().optional(),
+    atSec: z.number().optional(), durSec: z.number().optional().describe('default 5s'), posX: z.number().optional(), posY: z.number().optional(),
+    opacity: z.number().optional(), trackIndex: z.number().int().optional(), trackRenderIndex: z.number().int().optional() },
+  wrap(async (a) => get(a.draft).addLine({ color: a.color, lengthPx: a.lengthPx, thicknessPx: a.thicknessPx, vertical: a.vertical, atUs: sec(a.atSec), durUs: sec(a.durSec), posX: a.posX, posY: a.posY, opacity: a.opacity, trackIndex: a.trackIndex, trackRenderIndex: a.trackRenderIndex })));
 
 s.tool('capcut_add_track', 'Add a new track (video | audio | text | sticker).',
   { draft: z.string(), type: z.enum(['video', 'audio', 'text', 'sticker']).optional(), name: z.string().optional() },

@@ -302,7 +302,7 @@ export class CapCutDraft {
     } else mats = [...(this.content.materials.videos || []), ...(this.content.materials.audios || [])];
     const moved = [], skipped = [];
     for (const m of mats) {
-      if (!m.path || m.path.startsWith(this.dir + path.sep) || m.path.startsWith('##_')) continue;
+      if (!m.path || m.path.startsWith(this.dir + path.sep) || isPlaceholderPath(m.path)) continue; // already inside the project
       if (!fs.existsSync(m.path)) { skipped.push({ path: m.path, reason: 'file not found' }); continue; }
       const to = this.importFile(m.path); moved.push({ from: m.path, to }); m.path = to;
     }
@@ -314,7 +314,7 @@ export class CapCutDraft {
   _healMovedPaths() {
     const root = path.resolve(DRAFTS_DIR) + path.sep;
     for (const k of ['videos', 'audios']) for (const m of (this.content.materials?.[k] || [])) {
-      if (typeof m.path !== 'string' || !m.path.startsWith(root) || m.path.startsWith(this.dir + path.sep) || fs.existsSync(m.path)) continue;
+      if (typeof m.path !== 'string' || isPlaceholderPath(m.path) || !m.path.startsWith(root) || m.path.startsWith(this.dir + path.sep) || fs.existsSync(m.path)) continue;
       const rel = m.path.slice(root.length).split('/').slice(1).join('/'); // drop the old folder name
       const here = path.join(this.dir, rel);
       if (rel && fs.existsSync(here)) m.path = here;
@@ -732,7 +732,7 @@ export class CapCutDraft {
     if (overlaps) issues.push(`${overlaps} overlapping segment(s) on a single track`);
     if (riClash) issues.push(`${riClash} overlapping segment pair(s) share a render_index (ambiguous layer order)`);
     else if (ris.size < [...ris.values()].reduce((n, a) => n + a.length, 0)) warnings.push('some non-overlapping segments share a render_index (harmless; CapCut does this for sequential clips)');
-    for (const s of (c.materials?.videos || [])) if (s.path && !fs.existsSync(s.path)) issues.push(`missing media file: ${s.path}`);
+    for (const s of [...(c.materials?.videos || []), ...(c.materials?.audios || [])]) if (s.path && !fs.existsSync(resolveMediaPath(s.path, this.dir))) issues.push(`missing media file: ${s.path}`);
     // a keyframe outside its own segment's span never fires -- CapCut just plays a static value,
     // silently, with no error of its own. addKeyframe() rejects this at write time, but capcut_raw_patch
     // can still inject one directly, so this is the last line of defense before save().
@@ -837,6 +837,12 @@ function writeSolidPng(dir, hex, w, h) {
 }
 
 const MEDIA_SUBDIR = 'mcp_media';
+// CapCut stores files inside a project folder as "##_draftpath_placeholder_<id>_##/<relative path>" (it rewrites
+// our absolute mcp_media paths to this form once it has the project open). The prefix stands for the project
+// folder, so these paths are inside the project and survive renames on their own.
+const PLACEHOLDER_RE = /^##_draftpath_placeholder_[^#/]+_##(?=\/|$)/;
+export const isPlaceholderPath = p => typeof p === 'string' && PLACEHOLDER_RE.test(p);
+export function resolveMediaPath(p, projectDir) { return isPlaceholderPath(p) ? path.join(projectDir, p.replace(PLACEHOLDER_RE, '')) : p; }
 const fileHash = p => crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex');
 const sameFile = (a, b) => { try { return fs.statSync(a).size === fs.statSync(b).size && fileHash(a) === fileHash(b); } catch { return false; } };
 

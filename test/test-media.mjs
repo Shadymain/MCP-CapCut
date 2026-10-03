@@ -4,7 +4,7 @@ import { makeDraft } from './make-draft.mjs';
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-media-test-'));
 process.env.CAPCUT_DRAFTS_DIR = ROOT; // must be set before core.js loads
 delete process.env.CAPCUT_SYNC_MODE;
-const { CapCutDraft } = await import('../src/core.js');
+const { CapCutDraft, resolveMediaPath, isPlaceholderPath } = await import('../src/core.js');
 const { JournaledSession, liveSync } = await import('../src/live.js');
 const tick = () => new Promise(r => setTimeout(r, 0));
 const OUTSIDE = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-media-outside-')); // stands in for ~/Desktop, Figma exports, ...
@@ -85,5 +85,35 @@ const withMeta = (dir, id) => { fs.writeFileSync(path.join(dir, 'draft_meta_info
   assert.ok(pathOf(l.segmentId).startsWith(path.join(to, 'mcp_media') + path.sep), 'generated line in the new folder');
   assert.ok(fs.existsSync(pathOf(r.segmentId)) && fs.existsSync(pathOf(l.segmentId)));
   console.log('PASS 4 media follows a mid-sync rename');
+}
+// ---- 5. CapCut's "##_draftpath_placeholder_<id>_##/..." paths are files inside the project ----
+// (CapCut rewrites our absolute mcp_media paths to this form once it has the project open)
+{
+  const dir = withMeta(makeDraft(ROOT, 'm5'), 'ID-M5');
+  const PH = '##_draftpath_placeholder_0E685133-18CE-45ED-8CB8-2904A212EC80_##';
+  assert.equal(resolveMediaPath(`${PH}/mcp_media/line.png`, dir), path.join(dir, 'mcp_media', 'line.png'));
+  assert.equal(resolveMediaPath('/abs/file.png', dir), '/abs/file.png', 'normal paths unchanged');
+  assert.ok(!isPlaceholderPath('##_draftpath_placeholder_x_##evil') && !isPlaceholderPath(null), 'prefix must end at a path boundary');
+  write(path.join(dir, 'mcp_media'), 'line.png', 'LINE');
+  const f = path.join(dir, 'draft_content.json'), c = JSON.parse(fs.readFileSync(f, 'utf8'));
+  c.materials.videos.push({ id: 'PHMAT', type: 'photo', path: `${PH}/mcp_media/line.png`, material_name: 'line.png' });
+  c.materials.audios = [{ id: 'PHAUD', type: 'extract_music', path: `${PH}/mcp_media/gone.m4a` }];
+  fs.writeFileSync(f, JSON.stringify(c));
+  const d = new CapCutDraft('m5');
+  let v = d.validate();
+  assert.deepEqual(v.issues, [`missing media file: ${PH}/mcp_media/gone.m4a`], 'existing placeholder file passes, missing one is still caught');
+  d.content.materials.audios = [];
+  v = d.validate(); assert.ok(v.ok, v.issues.join('; '));
+  const before = d.content.materials.videos.find(m => m.id === 'PHMAT').path;
+  const r = d.localizeMedia();
+  assert.ok(!r.moved.some(x => x.from === before), 'localize leaves placeholder paths alone (already inside)');
+  assert.equal(d.content.materials.videos.find(m => m.id === 'PHMAT').path, before);
+  // rename: the placeholder stands for the project folder, so it keeps working untouched
+  d.save({ trusted: true });
+  const to = path.join(ROOT, 'm5 renamed'); fs.renameSync(path.join(ROOT, 'm5'), to);
+  const d2 = new CapCutDraft('m5 renamed');
+  assert.equal(d2.content.materials.videos.find(m => m.id === 'PHMAT').path, before, 'rename repair leaves it as is');
+  v = d2.validate(); assert.ok(v.ok, v.issues.join('; '));
+  console.log('PASS 5 placeholder paths');
 }
 console.log('\nALL MEDIA TESTS PASSED');

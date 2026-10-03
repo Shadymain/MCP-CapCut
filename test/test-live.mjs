@@ -1,10 +1,11 @@
 // Live-sync tests with a FAKE CapCut: safe to run anytime, never touches your real drafts.
 //   npm test
 import fs from 'fs'; import os from 'os'; import path from 'path'; import assert from 'assert';
-import { makeDraft } from './make-draft.mjs';
+import { makeDraft, NESTED_ID } from './make-draft.mjs';
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-live-test-'));
 process.env.CAPCUT_DRAFTS_DIR = ROOT; // must be set before core.js loads
 const { JournaledSession, liveSync } = await import('../src/live.js');
+const { CapCutDraft, listDrafts, cloneDraft } = await import('../src/core.js');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const read = dir => JSON.parse(fs.readFileSync(path.join(dir, 'draft_content.json'), 'utf8'));
 const segs = c => c.tracks.flatMap(t => t.segments);
@@ -100,5 +101,45 @@ function fakeApp(onQuit) { let running = true; return { log: [], isRunning: () =
   assert.equal(fs.readFileSync(path.join(dir, 'draft_content.json'), 'utf8'), orig);
   assert.ok(app.log.includes('launch'));
   console.log('PASS 6 validation guard');
+}
+// ---- 7. Mac root draft_info.json layout (no draft_content.json) ----
+{
+  const dir = makeDraft(ROOT, 'p7', 'info');
+  assert.ok(listDrafts().some(d => d.name === 'p7' && d.durationSec === 8), 'listed via draft_info.json');
+  const d = new CapCutDraft('p7');
+  assert.equal(d.contentPath, path.join(dir, 'draft_info.json'));
+  d.setProps('SEG1', { scale: 1.5 }); await tick();
+  await sleep(20); d.save({ trusted: true });
+  const info = fs.readFileSync(path.join(dir, 'draft_info.json'), 'utf8');
+  assert.equal(JSON.parse(info).tracks[0].segments[0].clip.scale.x, 1.5, 'edit saved to draft_info.json');
+  assert.equal(fs.readFileSync(path.join(dir, 'template-2.tmp'), 'utf8'), info, 'template-2.tmp mirror updated');
+  assert.ok(!fs.existsSync(path.join(dir, 'draft_content.json')), 'no stray draft_content.json created');
+  assert.ok(fs.existsSync(path.join(dir, 'draft_info.json.mcpbak')), 'backup written');
+  assert.equal(fs.readFileSync(path.join(dir, 'draft_info.json.bak'), 'utf8'), '{"capcut":"own backup"}', "CapCut's own .bak untouched");
+  console.log('PASS 7 root draft_info.json layout');
+}
+
+// ---- 8. Mac CapCut 9.x nested Timelines layout: nested file is authoritative, every copy rewritten ----
+{
+  const dir = makeDraft(ROOT, 'p8', 'nested');
+  const nested = path.join(dir, 'Timelines', NESTED_ID, 'draft_info.json');
+  const copies = [nested, path.join(dir, 'draft_info.json'), path.join(dir, 'template-2.tmp'), path.join(dir, 'Timelines', NESTED_ID, 'template-2.tmp')];
+  const sess = new JournaledSession('p8');
+  assert.equal(sess.draft.contentPath, nested, 'nested file is authoritative');
+  sess.api.setProps('SEG1', { scale: 1.5 }); await tick();
+  await sleep(20);
+  // CapCut flushes a hand edit into the NESTED file only on quit -> must be detected and rebased onto
+  const app = fakeApp(() => { const c = JSON.parse(fs.readFileSync(nested, 'utf8')); segs(c).find(s => s.id === 'SEG2').clip.rotation = 45; fs.writeFileSync(nested, JSON.stringify(c)); });
+  const settleArgs = []; const origSettle = app.waitForSettle; app.waitForSettle = async (...a) => { settleArgs.push(a); return origSettle.call(app); };
+  const r = await liveSync(sess, app, {});
+  assert.ok(r.synced && r.rebased, 'nested change detected + rebased');
+  assert.deepEqual(settleArgs[0], [nested, dir], 'waitForSettle watches the authoritative file');
+  const want = fs.readFileSync(nested, 'utf8'), c = JSON.parse(want), byId = Object.fromEntries(segs(c).map(s => [s.id, s]));
+  assert.equal(byId.SEG1.clip.scale.x, 1.5); assert.equal(byId.SEG2.clip.rotation, 45);
+  for (const p of copies) assert.equal(fs.readFileSync(p, 'utf8'), want, `copy in sync: ${path.relative(dir, p)}`);
+  // clone carries the nested layout along
+  cloneDraft('p8', 'p8-clone');
+  assert.equal(new CapCutDraft('p8-clone').contentPath, path.join(ROOT, 'p8-clone', 'Timelines', NESTED_ID, 'draft_info.json'));
+  console.log('PASS 8 nested Timelines layout:', r.steps.join(' | '));
 }
 console.log('\nALL LIVE-SYNC TESTS PASSED');

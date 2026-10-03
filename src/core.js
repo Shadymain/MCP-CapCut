@@ -115,13 +115,32 @@ function harvest(content) {
   return t;
 }
 
+// ---- which file holds the timeline ----
+// Mac CapCut 9.x keeps it at Timelines/<main_timeline_id>/draft_info.json (pointer in Timelines/project.json)
+// and mirrors it byte-for-byte to the root draft_info.json and template-2.tmp. Older/Windows builds use a
+// root draft_content.json; some Mac builds a root draft_info.json. `primary` is the ONE file we read and
+// check for outside changes; `mirrors` are the other copies that exist, rewritten on save so CapCut sees
+// the edit whichever copy it loads.
+export function resolveTimelineFiles(dir) {
+  let nested = null;
+  try {
+    const id = JSON.parse(fs.readFileSync(path.join(dir, 'Timelines', 'project.json'), 'utf8')).main_timeline_id;
+    if (typeof id === 'string' && /^[\w-]+$/.test(id)) nested = path.join(dir, 'Timelines', id);
+  } catch { /* no nested layout */ }
+  const order = [nested && path.join(nested, 'draft_info.json'), path.join(dir, 'draft_content.json'), path.join(dir, 'draft_info.json')].filter(Boolean);
+  const primary = order.find(p => fs.existsSync(p)) || null;
+  const copies = [...order, nested && path.join(nested, 'template-2.tmp'), path.join(dir, 'template-2.tmp')].filter(Boolean);
+  return { primary, mirrors: copies.filter(p => p !== primary && fs.existsSync(p)) };
+}
+const writeAtomic = (p, data) => { const tmp = p + '.tmp'; fs.writeFileSync(tmp, data); fs.renameSync(tmp, p); };
+
 export function listDrafts() {
   let names = [];
-  try { names = fs.readdirSync(DRAFTS_DIR).filter(n => { try { return fs.statSync(path.join(DRAFTS_DIR, n)).isDirectory() && fs.existsSync(path.join(DRAFTS_DIR, n, 'draft_content.json')); } catch { return false; } }); } catch {}
+  try { names = fs.readdirSync(DRAFTS_DIR).filter(n => { try { return fs.statSync(path.join(DRAFTS_DIR, n)).isDirectory() && resolveTimelineFiles(path.join(DRAFTS_DIR, n)).primary; } catch { return false; } }); } catch {}
   return names.map(name => {
     const dir = path.join(DRAFTS_DIR, name);
     let dur = null;
-    try { dur = JSON.parse(fs.readFileSync(path.join(dir, 'draft_content.json'), 'utf8')).duration / US; } catch {}
+    try { dur = JSON.parse(fs.readFileSync(resolveTimelineFiles(dir).primary, 'utf8')).duration / US; } catch {}
     return { name, locked: fs.existsSync(path.join(dir, '.locked')), durationSec: dur };
   });
 }
@@ -141,8 +160,9 @@ export class CapCutDraft {
   constructor(name) {
     this.name = name;
     this.dir = safeDraftPath(name);
-    this.contentPath = path.join(this.dir, 'draft_content.json');
-    if (!fs.existsSync(this.contentPath)) throw new Error(`draft not found: ${name} (in ${DRAFTS_DIR})`);
+    const { primary } = resolveTimelineFiles(this.dir);
+    if (!primary) throw new Error(`draft not found: ${name} (in ${DRAFTS_DIR})`);
+    this.contentPath = primary;
     this.content = JSON.parse(fs.readFileSync(this.contentPath, 'utf8'));
     this._loadedMtimeMs = fs.statSync(this.contentPath).mtimeMs;
     this.metaPath = path.join(this.dir, 'draft_meta_info.json');
@@ -154,7 +174,7 @@ export class CapCutDraft {
     let t = harvest(this.content);
     // fill any missing segment type from the template draft
     if (!t.video || !t.text || !t.audio) {
-      try { const base = JSON.parse(fs.readFileSync(path.join(DRAFTS_DIR, TEMPLATE_DRAFT, 'draft_content.json'), 'utf8')); const bt = harvest(base);
+      try { const base = JSON.parse(fs.readFileSync(resolveTimelineFiles(safeDraftPath(TEMPLATE_DRAFT)).primary, 'utf8')); const bt = harvest(base);
         for (const k of ['video', 'audio', 'text', 'image']) if (!t[k] && bt[k]) t[k] = bt[k];
         for (const k of Object.keys(bt.tracks)) if (!t.tracks[k]) t.tracks[k] = bt.tracks[k];
       } catch {}
@@ -659,8 +679,10 @@ export class CapCutDraft {
     const v = this.validate();
     if (!v.ok && !force) throw new Error(`refusing to save: ${v.issues.join('; ')} (fix the issues, or pass force:true to save anyway)`);
     const cPath = this.contentPath;
-    try { fs.copyFileSync(cPath, cPath + '.mcpbak'); } catch {}
-    const tmp = cPath + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(this.content)); fs.renameSync(tmp, cPath);
+    const data = JSON.stringify(this.content);
+    // authoritative file first, then every other timeline copy CapCut keeps (each backed up to .mcpbak)
+    const mirrors = resolveTimelineFiles(this.dir).mirrors.filter(p => p !== cPath);
+    for (const p of [cPath, ...mirrors]) { try { fs.copyFileSync(p, p + '.mcpbak'); } catch {} writeAtomic(p, data); }
     if (this.meta) { try { fs.copyFileSync(this.metaPath, this.metaPath + '.mcpbak'); } catch {} const mt = this.metaPath + '.tmp'; fs.writeFileSync(mt, JSON.stringify(this.meta)); fs.renameSync(mt, this.metaPath); }
     this._loadedMtimeMs = fs.statSync(cPath).mtimeMs;
     return { saved: this.name, durationSec: +(this.content.duration / US).toFixed(3), validation: v };
@@ -670,19 +692,18 @@ export class CapCutDraft {
 // clone a whole draft folder to a new name (valid scaffolding), optionally emptied
 export function cloneDraft(base, newName, { empty = false } = {}) {
   const src = safeDraftPath(base), dst = safeDraftPath(newName);
-  if (!fs.existsSync(path.join(src, 'draft_content.json'))) throw new Error(`base draft not found: ${base}`);
+  if (!resolveTimelineFiles(src).primary) throw new Error(`base draft not found: ${base}`);
   if (fs.existsSync(dst)) throw new Error(`draft already exists: ${newName}`);
   fs.mkdirSync(dst, { recursive: true });
-  for (const fn of fs.readdirSync(src)) {
-    if (fn === '.locked' || fn.endsWith('.mcpbak') || fn.endsWith('.tmp')) continue; // don't propagate this tool's own sentinel/backup files
-    const s = path.join(src, fn); try { if (fs.statSync(s).isFile()) fs.copyFileSync(s, path.join(dst, fn)); } catch {}
-  }
+  // recursive, so a nested Timelines/ layout comes along too
+  fs.cpSync(src, dst, { recursive: true, filter: s => { const fn = path.basename(s); return !(fn === '.locked' || fn.endsWith('.mcpbak') || fn.endsWith('.tmp')); } }); // don't propagate this tool's own sentinel/backup files
   if (empty) {
     const d = new CapCutDraft(newName);
     for (const k of Object.keys(d.content.materials)) if (Array.isArray(d.content.materials[k])) d.content.materials[k] = [];
     for (const tr of d.content.tracks) tr.segments = [];
     d.content.duration = 0; d.content.id = uid(); d.content.name = newName;
-    fs.writeFileSync(path.join(dst, 'draft_content.json'), JSON.stringify(d.content));
+    const data = JSON.stringify(d.content);
+    for (const p of [d.contentPath, ...resolveTimelineFiles(dst).mirrors]) fs.writeFileSync(p, data);
   }
   return { created: newName, dir: dst };
 }

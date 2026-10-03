@@ -1,7 +1,7 @@
 // live.js -- "auto-reload" sync between this MCP's editing session and the CapCut app.
 //
 // The problem: CapCut keeps the open project in memory and writes it back when it closes,
-// silently overwriting anything written to draft_content.json underneath it.
+// silently overwriting anything written to its timeline file underneath it.
 //
 // The fix: every editing tool call is journaled (method + args + the ids it generated). To sync:
 //   1. ask CapCut to quit (it flushes ITS copy -- including anything you changed by hand)
@@ -12,6 +12,7 @@
 //   5. relaunch CapCut (and optionally reopen the project)
 // If a replayed edit no longer applies (e.g. you deleted the clip it targets), nothing is written.
 import fs from 'fs';
+import path from 'path';
 import { CapCutDraft, withIdCapture, withIdReplay } from './core.js';
 
 // CapCutDraft methods that change the draft. Everything else passes straight through unjournaled.
@@ -90,7 +91,7 @@ export class JournaledSession {
   }
 }
 
-// app: { isRunning(), quit(), waitForSettle(dir), launch(), reopenProject(name) } -- see mac-app.js
+// app: { isRunning(), quit(), waitForSettle(contentPath, lockDir), launch(), reopenProject(name) } -- see mac-app.js
 export async function liveSync(session, app, { relaunch, reopen = true } = {}) {
   const result = { draft: session.name, pendingEdits: session.pending, steps: [] };
   if (!session.pending) return { ...result, synced: false, note: 'no pending edits to sync' };
@@ -104,7 +105,7 @@ export async function liveSync(session, app, { relaunch, reopen = true } = {}) {
   };
 
   if (wasRunning) { await app.quit(); result.steps.push('closed CapCut (it saved its own copy first)'); }
-  const settle = await app.waitForSettle(session.draft.dir);
+  const settle = await app.waitForSettle(session.draft.contentPath, session.draft.dir);
   if (settle?.staleLock) result.steps.push('note: a stale .locked file is left over from CapCut; ignored because CapCut is not running');
 
   const onDisk = fs.statSync(session.draft.contentPath).mtimeMs;
@@ -116,7 +117,7 @@ export async function liveSync(session, app, { relaunch, reopen = true } = {}) {
   let saved;
   try { saved = session.api.save({ trusted: true }); }
   catch (e) { await relaunchApp(); e.message = `nothing was written. ${e.message}`; throw e; }
-  result.steps.push('validated and saved (backup at draft_content.json.mcpbak)');
+  result.steps.push(`validated and saved ${path.basename(session.draft.contentPath)} (backup at .mcpbak)`);
   result.synced = true; result.saved = saved;
   await relaunchApp();
   return result;

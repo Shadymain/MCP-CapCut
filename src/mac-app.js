@@ -29,10 +29,11 @@ export const macApp = {
     }
   },
 
-  // Wait until draft_content.json stops changing and CapCut's .locked file is gone.
-  async waitForSettle(dir, { quietMs = 1000, timeoutMs = 15000 } = {}) {
-    const content = path.join(dir, 'draft_content.json');
-    const lock = path.join(dir, '.locked');
+  // Wait until the draft's authoritative timeline file stops changing and CapCut's .locked file is gone.
+  // contentPath: the session's resolved timeline file (may be nested under Timelines/); lockDir: the project folder.
+  async waitForSettle(contentPath, lockDir, { quietMs = 1000, timeoutMs = 15000 } = {}) {
+    const content = contentPath;
+    const lock = path.join(lockDir, '.locked');
     let last = fileSig(content), stableSince = Date.now();
     const t0 = Date.now();
     for (;;) {

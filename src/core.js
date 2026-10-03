@@ -146,6 +146,19 @@ export function listDrafts() {
   });
 }
 
+// CapCut renames a project's FOLDER when it closes the project after a rename in its UI (it sets
+// draft_need_rename_folder and defers the move), so a folder name can go stale mid-session. draft_id in
+// draft_meta_info.json is stable: this finds the folder that currently holds that id.
+export function findDraftById(draftId) {
+  if (!draftId) return null;
+  let names = [];
+  try { names = fs.readdirSync(DRAFTS_DIR); } catch { return null; }
+  for (const name of names) {
+    try { if (JSON.parse(fs.readFileSync(path.join(DRAFTS_DIR, name, 'draft_meta_info.json'), 'utf8')).draft_id === draftId) return name; } catch { /* not a draft */ }
+  }
+  return null;
+}
+
 // is CapCut running? (writing while open gets clobbered by autosave)
 // macOS: process name is "CapCut" by default; override with CAPCUT_PROCESS_NAME if `pgrep -lx CapCut` finds nothing.
 const MAC_PROCESS_NAME = process.env.CAPCUT_PROCESS_NAME || 'CapCut';
@@ -168,6 +181,7 @@ export class CapCutDraft {
     this._loadedMtimeMs = fs.statSync(this.contentPath).mtimeMs;
     this.metaPath = path.join(this.dir, 'draft_meta_info.json');
     this.meta = fs.existsSync(this.metaPath) ? JSON.parse(fs.readFileSync(this.metaPath, 'utf8')) : null;
+    this.draftId = this.meta?.draft_id || null; // CapCut's own id: survives renames, unlike the folder name
     this._tpl = null;
   }
   templates() {
@@ -305,7 +319,7 @@ export class CapCutDraft {
     this._mats('texts').push(mat);
     const refs = tpl.refs.filter(({ k }) => !CONTAMINATING_REF_KINDS.has(k)).map(({ k, m }) => { const c = clone(m); c.id = uid(); this._mats(k).push(c); return c.id; });
     const seg = clone(tpl.seg); seg.id = uid(); seg.material_id = mat.id; seg.extra_material_refs = refs;
-    if (opts.styleFrom) delete seg.common_keyframes; // the source layer's animation is not part of its style
+    if (opts.styleFrom) { delete seg.common_keyframes; seg.visible = true; } // the source's animation and hidden state are not part of its style
     const dur = opts.durUs || (opts.styleFrom ? tpl.seg.target_timerange.duration : 3 * US);
     const track = this._resolveTrack(opts, 'text');
     const at = opts.atUs != null ? opts.atUs : this._trackEnd(track); // omit atSec to append right after the last text on this track

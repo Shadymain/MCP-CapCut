@@ -129,4 +129,14 @@ const textOf = (d, segId) => { const s = segs(d.content).find(x => x.id === segI
   assert.equal(c.materials.texts.find(m => m.id === byId[t.segmentId].material_id).letter_spacing, 0.25);
   console.log('PASS 5 live-sync replay');
 }
+// ---- 6. styleFrom copies are always visible, even when the source layer is hidden ----
+{
+  makeTextDraft('t6');
+  const d = new CapCutDraft('t6');
+  d.setProps('TXT1', { visible: false });
+  const r = d.addText('VISIBLE', { styleFrom: 'TXT1', atUs: 0, trackIndex: d.addTrack('text', 'title') });
+  assert.equal(textOf(d, r.segmentId).s.visible, true, 'copy is visible');
+  assert.equal(textOf(d, 'TXT1').s.visible, false, 'source stays hidden');
+  console.log('PASS 6 styleFrom copies are visible');
+}
 console.log('\nALL TEXT/LINE TESTS PASSED');

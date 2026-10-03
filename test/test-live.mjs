@@ -6,7 +6,7 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'capcut-live-test-'));
 process.env.CAPCUT_DRAFTS_DIR = ROOT; // must be set before core.js loads
 delete process.env.CAPCUT_SYNC_MODE; // tests choose the mode explicitly
 const { JournaledSession, liveSync } = await import('../src/live.js');
-const { CapCutDraft, listDrafts, cloneDraft } = await import('../src/core.js');
+const { CapCutDraft, listDrafts, cloneDraft, findDraftById } = await import('../src/core.js');
 const { homeTileIndex } = await import('../src/mac-app.js');
 const { describeHelperFailure } = await import('../src/helper.js');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -254,5 +254,61 @@ function fakeCloseApp(dir, { onClose, closeFails, openWorks = true } = {}) {
   assert.match(fail({ step: 1, op: 'clickMenu', number: -1728, message: "Can't get menu item" }), /failed at step 2 \(clickMenu\): Can't get menu item \(-1728\)/);
   assert.match(fail({ step: 0, op: 'delay', message: 'request expired' }, false), /request expired/);
   console.log('PASS 15 helper failure messages');
+}
+// ---- 16. CapCut renames the project folder while it closes -> sync follows it by draft id ----
+// (CapCut defers a rename made in its UI -- draft_need_rename_folder -- and moves the folder when the project closes)
+const withMeta = (dir, id) => { fs.writeFileSync(path.join(dir, 'draft_meta_info.json'), JSON.stringify({ draft_id: id, draft_name: path.basename(dir), draft_fold_path: dir, draft_need_rename_folder: true })); return dir; };
+const capcutRename = (from, to) => { fs.renameSync(from, to); const m = path.join(to, 'draft_meta_info.json'), j = JSON.parse(fs.readFileSync(m, 'utf8')); Object.assign(j, { draft_name: path.basename(to), draft_fold_path: to, draft_need_rename_folder: false }); fs.writeFileSync(m, JSON.stringify(j)); };
+{
+  const dir = withMeta(makeDraft(ROOT, 'p16', 'nested'), 'ID-16');
+  const to = path.join(ROOT, 'p16-renamed');
+  const sess = new JournaledSession('p16');
+  assert.equal(sess.draft.draftId, 'ID-16');
+  sess.api.setProps('SEG1', { scale: 1.7 }); await tick();
+  const app = fakeCloseApp(dir);
+  app.closeProject = async () => { app.log.push('close'); fs.rmSync(path.join(dir, '.locked')); capcutRename(dir, to); }; // lock released, then the folder moves
+  const opened = []; app.openProject = async (n, d) => { app.log.push('open'); opened.push([n, d]); fs.writeFileSync(path.join(d, '.locked'), ''); return { reopened: true }; };
+  const settled = []; app.waitForSettle = async (...a) => { settled.push(a); return { staleLock: false }; };
+  const r = await liveSync(sess, app, { mode: 'close' });
+  assert.ok(r.synced && r.rebased, 'synced via a reload of the renamed folder');
+  assert.deepEqual(r.renamed, { from: 'p16', to: 'p16-renamed' }); assert.equal(r.draft, 'p16-renamed'); assert.equal(sess.name, 'p16-renamed');
+  assert.ok(!fs.existsSync(dir), 'old folder not recreated');
+  const nested = path.join(to, 'Timelines', NESTED_ID, 'draft_info.json');
+  assert.deepEqual(settled[1], [nested, to], 'waited on the new folder after the move');
+  assert.equal(JSON.parse(fs.readFileSync(nested, 'utf8')).tracks[0].segments[0].clip.scale.x, 1.7, 'edit written to the renamed project');
+  for (const p of [path.join(to, 'draft_info.json'), path.join(to, 'template-2.tmp')]) assert.equal(fs.readFileSync(p, 'utf8'), fs.readFileSync(nested, 'utf8'));
+  const meta = JSON.parse(fs.readFileSync(path.join(to, 'draft_meta_info.json'), 'utf8'));
+  assert.equal(meta.draft_name, 'p16-renamed', "CapCut's rename not reverted by the stale meta");
+  assert.equal(meta.draft_fold_path, to);
+  assert.deepEqual(opened, [['p16-renamed', to]], 'reopened under the new name');
+  assert.equal(r.via, 'close'); assert.ok(!r.fellBack);
+  assert.equal(findDraftById('ID-16'), 'p16-renamed'); assert.equal(findDraftById('nope'), null); assert.equal(findDraftById(null), null);
+  console.log('PASS 16 follows a rename by draft id:', r.steps.join(' | '));
+}
+
+// ---- 17. rename in quit mode, plus a user edit flushed into the renamed folder -> both kept ----
+{
+  const dir = withMeta(makeDraft(ROOT, 'p17'), 'ID-17');
+  const to = path.join(ROOT, 'p17 (renamed)');
+  const sess = new JournaledSession('p17');
+  sess.api.setProps('SEG1', { opacity: 0.4 }); await tick();
+  const app = fakeApp(() => { capcutRename(dir, to); const f = path.join(to, 'draft_content.json'), c = JSON.parse(fs.readFileSync(f, 'utf8')); segs(c).find(x => x.id === 'SEG2').clip.rotation = 12; fs.writeFileSync(f, JSON.stringify(c)); });
+  const r = await liveSync(sess, app, {});
+  assert.ok(r.synced); assert.equal(r.renamed.to, 'p17 (renamed)');
+  const byId = Object.fromEntries(segs(read(to)).map(x => [x.id, x]));
+  assert.equal(byId.SEG1.clip.alpha, 0.4); assert.equal(byId.SEG2.clip.rotation, 12);
+  console.log('PASS 17 rename in quit mode keeps both edits');
+}
+
+// ---- 18. project folder deleted (no draft with that id) -> clear error, nothing written, journal kept ----
+{
+  const dir = withMeta(makeDraft(ROOT, 'p18'), 'ID-18');
+  const sess = new JournaledSession('p18');
+  sess.api.setProps('SEG1', { scale: 2 }); await tick();
+  const app = fakeApp(() => fs.rmSync(dir, { recursive: true }));
+  await assert.rejects(liveSync(sess, app, {}), /nothing was written.*"p18" is gone.*ID-18/);
+  assert.ok(!fs.existsSync(dir), 'nothing recreated'); assert.equal(sess.pending, 1);
+  assert.ok(app.log.includes('launch'), 'CapCut relaunched');
+  console.log('PASS 18 deleted project');
 }
 console.log('\nALL LIVE-SYNC TESTS PASSED');

@@ -309,9 +309,15 @@ s.tool('capcut_live_sync', 'Push pending session edits into the CapCut app so th
   },
   wrap(async ({ draft, relaunch, reopen, mode }) => {
     if (process.platform !== 'darwin') throw new Error('capcut_live_sync is implemented for macOS only so far. On Windows, close CapCut and use capcut_save.');
-    const r = await liveSync(session(draft), macApp, { relaunch, reopen, ...(mode && { mode }) });
-    if (r.synced) open.delete(draft); // next edit starts from the freshly saved file
-    return r;
+    const sess = session(draft);
+    try {
+      const r = await liveSync(sess, macApp, { relaunch, reopen, ...(mode && { mode }) });
+      if (r.synced) open.delete(draft); // next edit starts from the freshly saved file
+      return r;
+    } finally {
+      // CapCut renamed the project mid-sync: keep any unsynced session under its new name
+      if (sess.name !== draft && open.get(draft) === sess) { open.delete(draft); open.set(sess.name, sess); }
+    }
   }));
 
 s.tool('capcut_live_status', 'Show whether CapCut is running, whether this draft is open in it, and how many edits are waiting to be synced.',

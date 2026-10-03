@@ -14,7 +14,7 @@
 // If a replayed edit no longer applies (e.g. you deleted the clip it targets), nothing is written.
 import fs from 'fs';
 import path from 'path';
-import { CapCutDraft, withIdCapture, withIdReplay } from './core.js';
+import { CapCutDraft, findDraftById, withIdCapture, withIdReplay } from './core.js';
 
 // CapCutDraft methods that change the draft. Everything else passes straight through unjournaled.
 export const MUTATING = new Set([
@@ -69,6 +69,16 @@ export class JournaledSession {
 
   get pending() { return this.journal.length; }
 
+  // If CapCut moved the project to a new folder (a rename it applied on close), point the session at the
+  // new folder by draft id. Returns { from, to } when it moved, null when the folder is still there.
+  followRename() {
+    if (fs.existsSync(this.draft.contentPath)) return null;
+    const to = findDraftById(this.draft.draftId);
+    if (!to) throw new Error(`nothing was written: the project folder "${this.name}" is gone and no draft with its id (${this.draft.draftId || 'unknown'}) was found -- was it deleted in CapCut?`);
+    const from = this.name; this.name = to;
+    return { from, to };
+  }
+
   // Reload the draft from disk and re-apply every journaled edit on top of it.
   rebase() {
     const fresh = new CapCutDraft(this.name);
@@ -101,7 +111,7 @@ export async function liveSync(session, app, { relaunch, reopen = true, mode = p
   const result = { draft: session.name, pendingEdits: session.pending, mode, steps: [] };
   if (!session.pending) return { ...result, synced: false, note: 'no pending edits to sync' };
 
-  const dir = session.draft.dir;
+  let dir = session.draft.dir;
   const wasRunning = app.isRunning();
   // how CapCut let go of the project: 'quit' (quit, or wasn't running), 'close' (back to home), 'none' (running, project not open)
   let via = 'quit';
@@ -129,10 +139,20 @@ export async function liveSync(session, app, { relaunch, reopen = true, mode = p
   };
 
   if (wasRunning && via === 'quit') { await app.quit(); result.steps.push('closed CapCut (it saved its own copy first)'); }
-  const settle = await app.waitForSettle(session.draft.contentPath, dir);
+  let settle = await app.waitForSettle(session.draft.contentPath, dir);
+  let renamed;
+  try { renamed = session.followRename(); } catch (e) { await restoreApp(); throw e; }
+  if (renamed) {
+    // the move happened while CapCut let go of the project: wait on the NEW folder before reading it
+    dir = path.join(path.dirname(dir), renamed.to);
+    settle = await app.waitForSettle(path.join(dir, path.relative(session.draft.dir, session.draft.contentPath)), dir);
+    result.renamed = renamed; result.draft = renamed.to;
+    result.steps.push(`CapCut renamed the project "${renamed.from}" -> "${renamed.to}" -- followed it by draft id`);
+  }
   if (settle?.staleLock) result.steps.push('note: a stale .locked file is left over from CapCut; ignored because CapCut is not running');
 
-  const onDisk = fs.statSync(session.draft.contentPath).mtimeMs;
+  // after a rename always reload: the folder, file paths and CapCut's meta (which save() writes back) all changed
+  const onDisk = renamed ? NaN : fs.statSync(session.draft.contentPath).mtimeMs;
   if (onDisk !== session.draft._loadedMtimeMs) {
     try { session.rebase(); result.rebased = true; result.steps.push(`project changed in CapCut -- reloaded it and re-applied ${session.pending} edit(s) on top`); }
     catch (e) { await restoreApp(); e.message = `nothing was written. ${e.message} Use capcut_discard and redo the edit, or undo your change in CapCut and sync again.`; throw e; }

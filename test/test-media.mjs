@@ -151,4 +151,34 @@ const withMeta = (dir, id) => { fs.writeFileSync(path.join(dir, 'draft_meta_info
   assert.equal(findDraftById('ID-M7'), 'm7-base'); assert.equal(findDraftById(meta.draft_id), 'm7-copy');
   console.log('PASS 7 clone gets its own identity');
 }
+// ---- 8. speed: CapCut plays source = timeline x speed (6s on the timeline at 1.5x uses 9s of footage) ----
+{
+  makeDraft(ROOT, 'm8');
+  const d = new CapCutDraft('m8');
+  const src = write(OUTSIDE, 'cursor-hero.mp4', 'V');
+  const r = d.addVideo(src, { atUs: 8e6, durUs: 6e6, srcStartUs: 1e6, speed: 1.5 });
+  const seg = () => d.content.tracks.flatMap(t => t.segments).find(x => x.id === r.segmentId);
+  let s = seg();
+  assert.equal(s.speed, 1.5); assert.deepEqual(s.target_timerange, { start: 8e6, duration: 6e6 });
+  assert.deepEqual(s.source_timerange, { start: 1e6, duration: 9e6 }, 'source span = 6s x 1.5');
+  const sp = d.content.materials.speeds.find(m => s.extra_material_refs.includes(m.id));
+  assert.equal(sp.speed, 1.5, 'speed material matches');
+  assert.ok(!d.validate().warnings.some(w => w.includes(r.segmentId)));
+  // trim keeps the ratio
+  d.trimSegment(r.segmentId, { durUs: 4e6 }); s = seg();
+  assert.equal(s.source_timerange.duration, 6e6, 'trim to 4s at 1.5x uses 6s of footage');
+  // split keeps the ratio on both halves and the footage contiguous
+  const { right } = d.splitSegment(r.segmentId, 10e6);
+  const L = seg(), R = d.content.tracks.flatMap(t => t.segments).find(x => x.id === right);
+  assert.deepEqual([L.target_timerange.duration, L.source_timerange], [2e6, { start: 1e6, duration: 3e6 }]);
+  assert.deepEqual([R.target_timerange, R.source_timerange], [{ start: 10e6, duration: 2e6 }, { start: 4e6, duration: 3e6 }]);
+  // changing speed afterwards keeps the footage and changes the timeline length
+  d.setProps(right, { speed: 1 });
+  assert.deepEqual([R.target_timerange.duration, R.source_timerange.duration], [3e6, 3e6]);
+  assert.throws(() => d.setProps(right, { speed: 0 }), /speed must be > 0/);
+  // a mismatched segment (e.g. written by an older version) is flagged
+  R.source_timerange.duration = 1e6;
+  assert.ok(d.validate().warnings.some(w => w.includes(right) && /source span/.test(w)));
+  console.log('PASS 8 speed-aware source spans');
+}
 console.log('\nALL MEDIA TESTS PASSED');

@@ -176,7 +176,7 @@ s.tool('capcut_delete_segment', 'Remove a segment. With ripple:true, every later
   { draft: z.string(), segmentId: z.string(), ripple: z.boolean().optional(), rippleAllTracks: z.boolean().optional() },
   wrap(async ({ draft, segmentId, ripple, rippleAllTracks }) => get(draft).deleteSegment(segmentId, { ripple, rippleAllTracks })));
 
-s.tool('capcut_set_props', 'Set transform / opacity / volume / speed / visibility on a segment.',
+s.tool('capcut_set_props', 'Set transform / opacity / volume / speed / visibility on a segment. Changing speed keeps the same footage, so the clip gets shorter or longer on the timeline (no ripple: check for gaps/overlaps after).',
   { draft: z.string(), segmentId: z.string(), scale: z.number().optional(), scaleX: z.number().optional(), scaleY: z.number().optional(),
     posX: z.number().optional(), posY: z.number().optional(), rotation: z.number().optional(), opacity: z.number().optional(),
     volume: z.number().optional(), speed: z.number().optional(), visible: z.boolean().optional() },

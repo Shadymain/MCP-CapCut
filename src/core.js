@@ -257,7 +257,8 @@ export class CapCutDraft {
     const tplType = kind === 'image' ? (this.templates().image ? 'image' : 'video') : kind;
     const tpl = this.templates()[tplType] || this.templates().video;
     if (!tpl) throw new Error(`no ${kind} template available`);
-    const dur = opts.durUs != null ? opts.durUs : probeDur(file);
+    const speed = opts.speed ?? 1;
+    const dur = opts.durUs != null ? opts.durUs : Math.round((probeDur(file) - (opts.srcStartUs || 0)) / speed); // default: the rest of the file, at this speed
     const mat = clone(tpl.mat); mat.id = uid(); mat.path = file.replace(/\\/g, '/'); mat.material_name = path.basename(file); mat.type = type;
     if (kind !== 'audio') { const { w, h } = opts.size || probeWH(file); mat.width = w; mat.height = h; }
     mat.duration = opts.size ? (opts.durUs || 5 * US) : probeDur(file); // always the real file's own duration, never the cloned template's stale value
@@ -269,8 +270,11 @@ export class CapCutDraft {
     const track = this._resolveTrack(opts, kind === 'audio' ? 'audio' : 'video');
     const at = opts.atUs != null ? opts.atUs : this._trackEnd(track); // omit atSec to append right after the last clip on this track
     seg.target_timerange = { start: at, duration: dur };
-    seg.source_timerange = { start: opts.srcStartUs || 0, duration: dur };
+    seg.speed = speed; // never the template's own speed
+    // CapCut: source span = timeline span x speed (a 6s clip at 1.5x plays 9s of footage)
+    seg.source_timerange = { start: opts.srcStartUs || 0, duration: srcSpan(seg, dur) };
     this._applyProps(seg, opts);
+    seg.target_timerange.duration = dur; // exact, whatever rounding the speed step did
     seg.render_index = this._nextRender();
     seg.track_render_index = opts.trackRenderIndex != null ? opts.trackRenderIndex : (this.content.tracks.indexOf(track));
     track.segments.push(seg);
@@ -412,7 +416,7 @@ export class CapCutDraft {
     const { tr, s } = this._find(segId);
     const oldEnd = s.target_timerange.start + s.target_timerange.duration;
     if (atUs != null) s.target_timerange.start = atUs;
-    if (durUs != null) { s.target_timerange.duration = durUs; s.source_timerange.duration = durUs; }
+    if (durUs != null) { s.target_timerange.duration = durUs; s.source_timerange.duration = srcSpan(s, durUs); }
     if (srcStartUs != null) s.source_timerange.start = srcStartUs;
     const newEnd = s.target_timerange.start + s.target_timerange.duration;
     const delta = newEnd - oldEnd;
@@ -435,9 +439,10 @@ export class CapCutDraft {
     const right = clone(s); right.id = uid();
     // clone extra_material_refs so the two halves don't share state
     right.extra_material_refs = (s.extra_material_refs || []).map(id => { const [k, m] = findMat(this.content, id); if (!m) return id; const c = clone(m); c.id = uid(); this._mats(k).push(c); return c.id; });
-    s.target_timerange.duration = left; s.source_timerange.duration = left;
+    const srcStart = s.source_timerange.start || 0, srcTotal = s.source_timerange.duration, srcLeft = srcSpan(s, left);
+    s.target_timerange.duration = left; s.source_timerange.duration = srcLeft;
     right.target_timerange = { start: atUs, duration: d - left };
-    right.source_timerange = { start: (s.source_timerange.start || 0) + left, duration: d - left };
+    right.source_timerange = { start: srcStart + srcLeft, duration: srcTotal - srcLeft };
     right.render_index = this._nextRender();
     tr.segments.push(right);
     return { left: segId, right: right.id };
@@ -463,7 +468,7 @@ export class CapCutDraft {
     if (p.opacity != null) seg.clip.alpha = p.opacity;
     if (p.volume != null) seg.volume = p.volume;
     if (p.visible != null) seg.visible = p.visible;
-    if (p.speed != null) { seg.speed = p.speed; const spId = (seg.extra_material_refs || []).find(id => findMat(this.content, id)[0] === 'speeds'); if (spId) { const [, sp] = findMat(this.content, spId); if (sp) sp.speed = p.speed; } }
+    if (p.speed != null) { if (!(p.speed > 0)) throw new Error(`speed must be > 0 (got ${p.speed})`); seg.speed = p.speed; if (seg.source_timerange && seg.target_timerange && seg.target_timerange.duration) seg.target_timerange.duration = Math.round(seg.source_timerange.duration / p.speed); /* same footage, played faster/slower */ const spId = (seg.extra_material_refs || []).find(id => findMat(this.content, id)[0] === 'speeds'); if (spId) { const [, sp] = findMat(this.content, spId); if (sp) sp.speed = p.speed; } }
   }
   _recalcDuration() { let max = 0; for (const tr of this.content.tracks) for (const s of (tr.segments || [])) max = Math.max(max, s.target_timerange.start + s.target_timerange.duration); this.content.duration = max; }
 
@@ -755,6 +760,11 @@ export class CapCutDraft {
       const [k] = findMat(c, id);
       if (k === null) issues.push(`segment ${s.id} references material ${id} which does not exist in any materials array`);
     }
+    for (const tr of c.tracks) for (const s of (tr.segments || [])) {
+      if (!s.source_timerange || !s.target_timerange || tr.type === 'text' || tr.type === 'sticker') continue;
+      const want = s.target_timerange.duration * (s.speed || 1);
+      if (Math.abs(s.source_timerange.duration - want) > US / 30) warnings.push(`segment ${s.id}: source span ${(s.source_timerange.duration / US).toFixed(3)}s != timeline ${(s.target_timerange.duration / US).toFixed(3)}s x speed ${s.speed || 1}`);
+    }
     for (const s of (c.materials?.audio_fades || [])) {
       const referenced = c.tracks.some(tr => (tr.segments || []).some(seg => (seg.extra_material_refs || []).includes(s.id)));
       if (!referenced) warnings.push(`audio_fade material ${s.id} exists but is not referenced by any segment (orphaned)`);
@@ -869,6 +879,9 @@ export const isPlaceholderPath = p => typeof p === 'string' && PLACEHOLDER_RE.te
 export function resolveMediaPath(p, projectDir) { return isPlaceholderPath(p) ? path.join(projectDir, p.replace(PLACEHOLDER_RE, '')) : p; }
 const fileHash = p => crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex');
 const sameFile = (a, b) => { try { return fs.statSync(a).size === fs.statSync(b).size && fileHash(a) === fileHash(b); } catch { return false; } };
+
+// how much source footage a timeline span consumes at the segment's speed
+const srcSpan = (seg, targetUs) => Math.round(targetUs * (seg.speed || 1));
 
 function hexToRgb(hex) { const h = hex.replace('#', ''); return [parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255]; }
 function deepMerge(t, s) { for (const k of Object.keys(s)) { if (s[k] && typeof s[k] === 'object' && !Array.isArray(s[k]) && t[k] && typeof t[k] === 'object') deepMerge(t[k], s[k]); else t[k] = s[k]; } return t; }
